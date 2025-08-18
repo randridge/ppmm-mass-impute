@@ -3,3 +3,6 @@
 .RData
 .Ruserdata
 .DS_Store
+example_HPS/old/
+example_NSFG/old/
+simulation/simulation_design.docx
