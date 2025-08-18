@@ -1,0 +1,565 @@
+---
+title: "Census HPS Application"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(tidyverse)
+library(survey)
+# library(ppmm)
+library(nonprobsvy)
+# library(haven)
+# library(mice)
+# library(mitools)
+options(knitr.kable.NA = '')
+
+source("../functions/mub_reg_bayes_local.R")
+source('../functions/BasFunctions.R')
+source("../functions/BasFunctions_edit.R")
+```
+
+# Data Prep
+
+## HPS data (NP sample)
+
+```{r}
+# HPS microdata (Wave 61)
+hps <- read_csv("./microdata_hps2023.csv") %>%
+  filter(WEEK == 61) %>%
+  mutate(# binary sex
+         male = (EGENID_BIRTH == 1),
+         # education level, collapsed
+         educ_lths = (EEDUC %in% c(1,2)),     # less than HS(1)/some HS(2)
+         educ_hs = (EEDUC== 3),               # HS grad(3)
+         educ_somecoll = (EEDUC %in% c(4,5)), # some college(4)/associates degree(5)
+         educ_bach = (EEDUC == 6),            # bachelor's degree(6)
+         educ_graddeg = (EEDUC == 7),         # graduate degree(7)
+         # race/ethnicity
+         race_hisp = (RHISPANIC == 2),                   # Hispanic
+         race_nhwhite = (RHISPANIC == 1 & RRACE == 1),   # NH white
+         race_nhblack = (RHISPANIC == 1 & RRACE == 2),   # NH Black
+         race_nhasian = (RHISPANIC == 1 & RRACE == 3),   # NH Asian
+         race_other = (RHISPANIC == 1 & RRACE == 4),     # any other race alone or in combination
+         # age, categorized
+         age = 2023 - TBIRTH_YEAR,
+         age_18_25 = (18 <= age & age <= 25),
+         age_26_35 = (26 <= age & age <= 35),
+         age_36_45 = (36 <= age & age <= 45),
+         age_46_55 = (46 <= age & age <= 55),
+         age_56_65 = (46 <= age & age <= 65),
+         age_66_75 = (66 <= age & age <= 75),
+         age_76plus = (age >= 76),
+         # region
+         region_ne = (REGION == 1), # northeast
+         region_s = (REGION == 2),  # south
+         region_mw = (REGION == 3), # midwest
+         region_w = (REGION == 4),  # west
+         # remove missing codes from PHQ and GAD variables
+         across(c(ANXIOUS,WORRY, INTEREST, DOWN), ~ na_if(.x, -99)),
+         # Depression score (PHQ-2)
+         phq2 = INTEREST + DOWN - 2, #-2 necessary since vars are 1-4 but scoring uses 0-3
+         # Anxiety score (GAD)
+         gad2 = ANXIOUS + WORRY - 2, #-2 necessary since vars are 1-4 but scoring uses 0-3
+         )
+```
+
+HPS sample size: `r nrow(hps)`
+
+## NHIS data (P sample)
+
+```{r}
+# NHIS 2023 microdata
+nhis <- read_csv("./microdata_nhis2023.csv") %>%
+  mutate(# binary sex
+         male = case_when(SEX_A == 1 ~ 1,
+                          SEX_A == 2 ~ 0), # 7(REF) and 9(DK) will be coded as missing
+         # education level, collapsed
+         educ = case_when(EDUCP_A %in% c(97,99) ~ NA, .default = EDUCP_A),
+         educ_lths = case_when(!is.na(educ) ~ 1*(educ %in% c(1,2))),       # grade 1-11(1)/12th no diploma(2)
+         educ_hs = case_when(!is.na(educ) ~ 1*(educ %in% c(3,4))),         # GED(3)/HS grad(4)
+         educ_somecoll = case_when(!is.na(educ) ~ 1*(educ %in% c(5,6,7))), # some college(5)/associates degree(6,7)
+         educ_bach = case_when(!is.na(educ) ~ 1*(educ == 8)),              # bachelor's degree(6)
+         educ_graddeg = case_when(!is.na(educ) ~ 1*(educ %in% c(9,10))),   # graduate degree(7)
+         # race/ethnicity
+         race_hisp = 1*(HISPALLP_A == 1),            # Hispanic
+         race_nhwhite = 1*(HISPALLP_A == 2),         # NH white alone
+         race_nhblack = 1*(HISPALLP_A == 3),         # NH Black alone
+         race_nhasian = 1*(HISPALLP_A == 4),         # NH Asian alone
+         race_other = 1*(HISPALLP_A %in% c(5,6,7)),  # any other race alone or in combination
+         # age, categorized
+         age = case_when(AGEP_A %in% c(97,99) ~ NA, .default = AGEP_A),
+         age_18_25 = case_when(!is.na(age) ~ 1*(18 <= age & age <= 25)),
+         age_26_35 = case_when(!is.na(age) ~ 1*(26 <= age & age <= 35)),
+         age_36_45 = case_when(!is.na(age) ~ 1*(36 <= age & age <= 45)),
+         age_46_55 = case_when(!is.na(age) ~ 1*(46 <= age & age <= 55)),
+         age_56_65 = case_when(!is.na(age) ~ 1*(56 <= age & age <= 65)),
+         age_66_75 = case_when(!is.na(age) ~ 1*(66 <= age & age <= 75)),
+         age_76plus = case_when(!is.na(age) ~ 1*(age >= 76)),
+         # region
+         region_ne = 1*(REGION == 1), # northeast
+         region_s = 1*(REGION == 3),  # south
+         region_mw = 1*(REGION == 2), # midwest
+         region_w = 1*(REGION == 4),  # west
+         # remove missing codes from PHQ and GAD variables
+         across(c(PHQ43_A, PHQ44_A, PHQ41_A, PHQ42_A), ~ na_if(.x, 7)),
+         across(c(PHQ43_A, PHQ44_A, PHQ41_A, PHQ42_A), ~ na_if(.x, 8)),
+         across(c(PHQ43_A, PHQ44_A, PHQ41_A, PHQ42_A), ~ na_if(.x, 9)),
+         # Depression score (PHQ-2)
+         phq2 = PHQ41_A + PHQ42_A - 2, #-2 necessary since vars are 1-4 but scoring uses 0-3
+         # Anxiety score (GAD)
+         gad2 = PHQ43_A + PHQ44_A - 2, #-2 necessary since vars are 1-4 but scoring uses 0-3
+         )
+
+nhis$ccind <- nhis %>%
+  dplyr::select(male:gad2) %>%
+  complete.cases()
+
+```
+
+NHIS full sample size: `r nrow(nhis)`
+
+# Summary of Variables Used
+
+* Y = depression score (PHQ-2)  
+* A = anxiety score (GAD-2)  
+* Z = sex (binary), education (5 level), race/ethnicity (5 level), age (7 level), region (4 level)
+
+## HPS (NP sample)
+
+```{r}
+hps %>%
+  dplyr::select(phq2, gad2, male, starts_with("educ_"), starts_with("race_"), starts_with("age_"), starts_with("region_")) %>%
+  gtsummary::tbl_summary(type = c(phq2, gad2) ~ "continuous2",
+                         statistic = c(phq2, gad2) ~ c("{mean} ({sd})", "{min}, {max}"),
+                         missing_text = "Missing")
+```
+
+## NHIS (P sample)
+
+```{r}
+nhis.design <- survey::svydesign(~PPSU, weights = ~WTFA_A, strata = ~PSTRAT, data = nhis, nest = TRUE)
+nhis.design %>%
+  gtsummary::tbl_svysummary(include = c(phq2, gad2, 
+                                        male,
+                                        educ_lths, educ_hs, educ_somecoll, educ_bach, educ_graddeg,
+                                        race_hisp, race_nhwhite, race_nhblack, race_nhasian, race_other,
+                                        age_18_25, age_26_35, age_36_45, age_46_55, age_56_65, age_66_75, age_76plus,
+                                        region_ne, region_s, region_mw, region_w),
+                            type = c(phq2, gad2) ~ "continuous2",
+                            statistic = list(c(phq2, gad2) ~ c("{mean} ({sd})", "{min}, {max}")),
+                            missing = "no")
+```
+
+# Estimators
+
+## Naive Estimate from NP sample
+
+Unweighted mean
+
+```{r}
+est_naive <- mean(hps$phq2, na.rm=TRUE)
+fit <- lm(phq2 ~ 1, data=hps)
+lb_naive <- confint(fit)[1]
+ub_naive <- confint(fit)[2]
+est_naive
+c(lb_naive, ub_naive)
+```
+
+Weighted (using HPS weights) mean
+
+```{r}
+hps.design <- survey::svydesign(~1, weights = ~PWEIGHT, data = hps)
+est_hpswt <- svymean(~phq2, hps.design, na.rm = TRUE)[1]
+ci <- confint(svymean(~phq2, hps.design, na.rm = TRUE))
+lb_hpswt <- ci[1]
+ub_hpswt <- ci[2]
+est_hpswt
+c(lb_hpswt, ub_hpswt)
+```
+
+## Proposed Approach
+
+```{r}
+# summary statistics for NP sample (selected sample)
+samp.NP <- hps %>%
+  dplyr::select(phq2, # Y VARIABLE
+                male,
+                educ_lths, educ_hs, educ_somecoll, educ_bach, # REF = educ_graddeg,
+                race_hisp, race_nhwhite, race_nhblack, race_nhasian, # REF = race_other,
+                age_18_25, age_26_35, age_36_45, age_46_55, age_56_65, age_66_75, # REF = age_76plus,
+                region_ne, region_s, region_mw, # REF = region_w
+                gad2) %>%  #A VARIABLE
+  drop_na()
+```
+
+HPS sample size: n = `r nrow(hps)`
+
+After excluding missing Y, Z, or A values: n = `r nrow(samp.NP)`
+
+```{r}
+stats_NP <- list(n_s = nrow(samp.NP),
+                 mean_YZA_s = colMeans(samp.NP),
+                 var_YZA_s = var(samp.NP))
+```
+
+
+```{r}
+# summary statistics for P sample (non-selected sample)
+n_P <- nrow(nhis) #sum(nhis$WTFA_A)
+means_P <- c(svymean(~ male, nhis.design, na.rm=TRUE)[1],
+            svymean(~ educ_lths, nhis.design, na.rm=TRUE)[1],
+            svymean(~ educ_hs, nhis.design, na.rm=TRUE)[1],
+            svymean(~ educ_somecoll, nhis.design, na.rm=TRUE)[1],
+            svymean(~ educ_bach, nhis.design, na.rm=TRUE)[1], # REF = educ_graddeg,
+            svymean(~ race_hisp, nhis.design, na.rm=TRUE)[1],
+            svymean(~ race_nhwhite, nhis.design, na.rm=TRUE)[1],
+            svymean(~ race_nhblack, nhis.design, na.rm=TRUE)[1],
+            svymean(~ race_nhasian, nhis.design, na.rm=TRUE)[1],# REF = race_other,
+            svymean(~ age_18_25, nhis.design, na.rm=TRUE)[1],
+            svymean(~ age_26_35, nhis.design, na.rm=TRUE)[1],
+            svymean(~ age_36_45, nhis.design, na.rm=TRUE)[1],
+            svymean(~ age_46_55, nhis.design, na.rm=TRUE)[1],
+            svymean(~ age_56_65, nhis.design, na.rm=TRUE)[1],
+            svymean(~ age_66_75, nhis.design, na.rm=TRUE)[1],# REF = age_76plus,
+            svymean(~ region_ne, nhis.design, na.rm=TRUE)[1],
+            svymean(~ region_s, nhis.design, na.rm=TRUE)[1],
+            svymean(~ region_mw, nhis.design, na.rm=TRUE)[1], # REF = region_w
+            svymean(~ gad2, nhis.design, na.rm=TRUE)[1]) # A variable
+var_P <- svyvar(~ male + educ_lths + educ_hs + educ_somecoll + educ_bach +
+                 race_hisp + race_nhwhite + race_nhblack + race_nhasian +
+                 age_18_25 + age_26_35 + age_36_45 + age_46_55 + age_56_65 + age_66_75 +
+                 region_ne + region_s + region_mw + 
+                 gad2, 
+               na.rm=TRUE, design=nhis.design)
+stats_P <- list(n_ns = n_P,
+                mean_ZA_ns = means_P,
+                var_ZA_ns = var_P)
+# Extract Z variables of interest from P sample, adding column of 1s for intercept
+# Some observations have missing covariate values, remove them
+CC <- nhis %>%
+  dplyr::select(WTFA_A,
+                male,
+                educ_lths, educ_hs, educ_somecoll, educ_bach,
+                race_hisp, race_nhwhite, race_nhblack, race_nhasian,
+                age_18_25, age_26_35, age_36_45, age_46_55, age_56_65, age_66_75,
+                region_ne, region_s, region_mw) %>%
+  drop_na()
+# Z matrix for complete cases
+ZMAT_P <- CC %>%
+  dplyr::select(-WTFA_A) %>%
+  add_column(intercept = 1) %>%
+  relocate(intercept) %>%
+  as.matrix()
+# weights for complete cases
+W <- CC$WTFA_A
+# number of CC
+n_P_CC <- length(W)
+
+## Uniform(0,1) prior on phi
+set.seed(347834)
+draws <- mub_reg_bayes(stats_NP, stats_P, zparams = 18, ndraws = 1000)
+
+# Look at MUB(phi) posterior distributions
+theme_set(theme_bw())
+mub <- as_tibble(draws$mubdraws) %>%
+  pivot_longer(index.B0:index.B18, names_to = "parameter", values_to = "value") %>%
+  group_by(parameter) %>%
+  summarize(mub = median(value),
+            lb = quantile(value, .025),
+            ub = quantile(value, .975)) %>%
+  mutate(parameter_f = factor(parameter,
+                              levels = names(draws$mubdraws),
+                              labels = c("intercept", names(samp.NP)[2:19])))
+mub %>%
+  ggplot(aes(x = mub, y = fct_rev(parameter_f))) + 
+  geom_point() + 
+  geom_errorbar(aes(xmin = lb, xmax = ub)) + 
+  geom_vline(xintercept = 0, linetype = 2) + 
+  labs(y = "Z Variable",
+       x = "95% Credible Interval for MUB(phi)")
+```
+
+```{r}
+# Proxy strength
+median(draws$rhodraws)
+
+# predict Y in P sample (using draws of adjusted betas)
+ybarhats <- ZMAT_P %*% t(draws$betadraws)   # rows = observations, columns = draws
+residerrors <- apply(as.matrix(draws$residdraws), 1, function(x) rnorm(n_P_CC, mean = 0, sd = sqrt(x)))
+yhat <- ybarhats + residerrors
+# draws of estimated mean of Y in P sample (weighted means using NHIS weights)
+draws_ymean <- apply(yhat, 2, function(x) sum(x*W)/sum(W))
+# Plot versus phi
+plot(draws$phidraws, draws_ymean)
+# posterior median and 95% CrI for probability sample mean Y
+est_ppmmreg <- median(draws_ymean)
+# credible interval
+lb_ppmmreg <- as.numeric(quantile(draws_ymean, 0.025))
+ub_ppmmreg <- as.numeric(quantile(draws_ymean, 0.975))
+
+est_ppmmreg
+c(lb_ppmmreg, ub_ppmmreg)
+```
+
+NHIS sample size with complete Z and A variables (i.e., sample we impute to): `r nrow(CC)`
+
+## Proposed Approach with $\phi$ = 1
+
+```{r}
+## phi = 1
+set.seed(347834)
+draws_phi1 <- mub_reg_bayes(stats_NP, stats_P, zparams = 18, ndraws = 1000, userphi = 1)
+
+# predict Y in P sample (using draws of adjusted betas)
+ybarhats_1 <- ZMAT_P %*% t(draws_phi1$betadraws)   # rows = observations, columns = draws
+residerrors_1 <- apply(as.matrix(draws_phi1$residdraws), 1, function(x) rnorm(n_P_CC, mean = 0, sd = sqrt(x)))
+yhat_1 <- ybarhats_1 + residerrors_1
+# draws of estimated mean of Y in P sample (weighted means using NHIS weights)
+draws_ymean_1 <- apply(yhat_1, 2, function(x) sum(x*W)/sum(W))
+# posterior median and 95% CrI for probability sample mean Y
+est_ppmmreg.phi1 <- median(draws_ymean_1)
+# credible interval
+lb_ppmmreg.phi1 <- as.numeric(quantile(draws_ymean_1, 0.025))
+ub_ppmmreg.phi1 <- as.numeric(quantile(draws_ymean_1, 0.975))
+
+est_ppmmreg.phi1
+c(lb_ppmmreg.phi1, ub_ppmmreg.phi1)
+```
+
+## Mass Imputation (assuming transportability)
+
+```{r}
+# Mass imputation
+chen_mi <- nonprobsvy::nonprob(outcome = phq2 ~ male + educ_lths + educ_hs + educ_somecoll + educ_bach +
+                                 race_hisp + race_nhwhite + race_nhblack + race_nhasian +
+                                 age_18_25 + age_26_35 + age_36_45 + age_46_55 + age_56_65 + age_66_75 +
+                                 region_ne + region_s + region_mw +
+                                 gad2, 
+                               data = samp.NP, 
+                               svydesign = subset(nhis.design, ccind==TRUE), 
+                               method_outcome = "glm", 
+                               family_outcome = "gaussian")
+est_mi <- as.numeric(chen_mi$output[1])
+lb_mi <- as.numeric(chen_mi$confidence_interval[1])
+ub_mi <- as.numeric(chen_mi$confidence_interval[2])
+est_mi
+c(lb_mi, ub_mi)
+```
+
+## IPW (assuming ignorable selection)
+
+```{r}
+# IPW
+chen_ipw <- nonprobsvy::nonprob(selection = ~ male + educ_lths + educ_hs + educ_somecoll + educ_bach +
+                                 race_hisp + race_nhwhite + race_nhblack + race_nhasian +
+                                 age_18_25 + age_26_35 + age_36_45 + age_46_55 + age_56_65 + age_66_75 +
+                                 region_ne + region_s + region_mw +
+                                 gad2, 
+                                target = ~ phq2, 
+                                data = samp.NP, 
+                                svydesign = subset(nhis.design, ccind==TRUE),
+                                control_selection = control_sel(maxit = 1000, est_method = "gee"))
+est_ipw <- as.numeric(chen_ipw$output[1])
+lb_ipw <- as.numeric(chen_ipw$confidence_interval[1])
+ub_ipw <- as.numeric(chen_ipw$confidence_interval[2])
+est_ipw
+c(lb_ipw, ub_ipw)
+```
+
+```{r, include = FALSE}
+chen_ipw
+length(chen_ipw$ipw_weights)
+hist(chen_ipw$ipw_weights)
+hist(1/chen_ipw$ipw_weights)
+sum(chen_ipw$y[[1]]*chen_ipw$ipw_weights)/sum(chen_ipw$ipw_weights)
+```
+
+```{r, include = FALSE}
+test <- nonprobsvy::nonprob(selection = ~ male + educ_lths + educ_hs + educ_somecoll + educ_bach +
+                                 race_hisp + race_nhwhite + race_nhblack + race_nhasian +
+                                 age_18_25 + age_26_35 + age_36_45 + age_46_55 + age_56_65 + age_66_75 +
+                                 region_ne + region_s + region_mw +
+                                 gad2, 
+                                target = ~ phq2, 
+                                data = samp.NP, 
+                                svydesign = subset(nhis.design, ccind==TRUE),
+                                # control_selection = control_sel(maxit = 1000, penalty="MCP", nfolds=5),
+                                control_selection = control_sel(est_method = "gee"),
+                                control_inference = control_inf(var_method="bootstrap"))
+test
+```
+
+
+## DR (assuming transportability/ignorable selection)
+
+```{r}
+# Doubly robust (assumes transportability)
+chen_dr <- nonprobsvy::nonprob(selection = ~ male + educ_lths + educ_hs + educ_somecoll + educ_bach +
+                                 race_hisp + race_nhwhite + race_nhblack + race_nhasian +
+                                 age_18_25 + age_26_35 + age_36_45 + age_46_55 + age_56_65 + age_66_75 +
+                                 region_ne + region_s + region_mw +
+                                 gad2, 
+                               outcome = phq2 ~ male + educ_lths + educ_hs + educ_somecoll + educ_bach +
+                                 race_hisp + race_nhwhite + race_nhblack + race_nhasian +
+                                 age_18_25 + age_26_35 + age_36_45 + age_46_55 + age_56_65 + age_66_75 +
+                                 region_ne + region_s + region_mw +
+                                 gad2, 
+                               data = samp.NP, 
+                               svydesign = subset(nhis.design, ccind==TRUE), 
+                               method_outcome = "glm", 
+                               family_outcome = "gaussian",
+                               control_selection = control_sel(maxit = 1000, est_method = "gee"))
+est_dr <- as.numeric(chen_dr$output[1])
+lb_dr <- as.numeric(chen_dr$confidence_interval[1])
+ub_dr <- as.numeric(chen_dr$confidence_interval[2])
+est_dr
+c(lb_dr, ub_dr)
+```
+
+<!-- ## Shadow variable approach -->
+
+<!-- ```{r} -->
+<!-- # stack -->
+<!-- samp.P <- nhis %>% -->
+<!--   dplyr::select(male, -->
+<!--                 educ_lths, educ_hs, educ_somecoll, educ_bach, -->
+<!--                 race_hisp, race_nhwhite, race_nhblack, race_nhasian, -->
+<!--                 age_18_25, age_26_35, age_36_45, age_46_55, age_56_65, age_66_75, -->
+<!--                 region_ne, region_s, region_mw, -->
+<!--                 gad2) %>% -->
+<!--   drop_na() -->
+<!-- both <- bind_rows(samp.P, samp.NP) -->
+<!-- both_Z <- both %>% -->
+<!--   dplyr::select(-c(phq2,gad2)) -->
+
+<!-- # Shadow variable approach ----- -->
+<!-- Y <- both$phq2 # outcome -->
+<!-- R <- !is.na(Y) # response indicator -->
+<!-- Z <- both$gad2  # shadow variable -->
+<!-- Xr <- Xz <- Xs <- X <- as.matrix(cbind(1,both_Z)) # covariates plus intercept -->
+<!-- data1 <- list(Y=Y, R=R, Z=Z, Xs=Xs, Xr=Xr, Xz=Xz) -->
+<!-- # some starting values -->
+<!-- ymean_NP <- mean(Y, na.rm = T) -->
+<!-- # baseline propensity model -->
+<!-- fitr <- glm(R ~ X - 1, family=binomial()) -->
+<!-- # baseline outcome estimation -->
+<!-- fity <- lm(Y[R==1] ~ Z[R==1] + X[R==1,] - 1) -->
+<!-- # ancillary outcome estimation -->
+<!-- fitz <- lm(Z[R==1] ~ X[R==1,] - 1) -->
+<!-- ### DR estimate -->
+<!-- # starting param values -->
+<!-- drstartpar <- c(ymean_NP,            # psi = outcome mean -->
+<!--                 1,                   # gamma = OR -->
+<!--                 coef(fitr),          # coef from propensity model -->
+<!--                 fity$coef,           # coef from Y|Z,X,R=1 -->
+<!--                 fitz$coef,           # coef from Z|X,R=1 -->
+<!--                 summary(fity)$sig^2, # resid variance from Y|Z,X,R=1 -->
+<!--                 summary(fitz)$sig^2, # resid variance from Z|X,R=1 -->
+<!--                 ymean_NP)            # psiNR = NP outcome mean -->
+<!-- # point estimates -->
+<!-- drpar <- optim(par = drstartpar, # starting values of parameter vector -->
+<!--                fn = GMM,         # function to be min/max'd -->
+<!--                f = DRmrf_edit, data=data1, # additional arguments for fn -->
+<!--                method = "BFGS", hessian = FALSE)$par -->
+<!--         # variance estimates -->
+<!--         drvar <- VarEst(DRmrf_edit, drpar, data1) -->
+<!--         # overall mean Y -->
+<!--         est_shadowdr <- as.numeric(drpar[1]) -->
+<!--         # SE of mean Y -->
+<!--         se_shadowdr <- sqrt(drvar[1,1]) -->
+<!--         # 95% CI -->
+<!--         z <- qnorm(.975) -->
+<!--         lb_shadowdr <- est_shadowdr - z*se_shadowdr -->
+<!--         ub_shadowdr <- est_shadowdr + z*se_shadowdr -->
+<!--         # back-calculate mean in probability sample (easy since SRS) -->
+<!--         est_shadowdrP <- ((n_NP+n_P)*est_shadowdr - n_NP*ymean_NP)/n_P -->
+<!--         # note that drpar[15] = ymean_NP -->
+<!--         # SE of mean Y in prob sample -->
+<!--         se_shadowdrP <- sqrt((n_NP+n_P)^2*drvar[1,1] + n_NP^2*drvar[15,15] - 2*(n_NP+n_P)*n_NP*drvar[1,15])/n_P -->
+<!--         # 95% CI -->
+<!--         lb_shadowdrP <- est_shadowdrP - z*se_shadowdrP -->
+<!--         ub_shadowdrP <- est_shadowdrP + z*se_shadowdrP -->
+<!--         # estimated OR(Y) -->
+<!--         or_shadowdr <- drpar[2] -->
+<!--         orse_shadowdr <- sqrt(drvar[2,2]) -->
+<!-- ``` -->
+
+## Direct application of PPMM
+
+```{r}
+stats_NP <- list(mean_YZ = colMeans(samp.NP),
+                 var_YZ = var(samp.NP),
+                 n_YZ = nrow(samp.NP))
+stats_P <- list(mean_Z = means_P,
+                var_Z = var_P,
+                n_Z = n_P)
+
+# Apply fully Bayesian approach to NSFG data
+set.seed(2282)
+ppmm_bayes <- ppmm::means_bayes(stats_NP,
+                                stats_P,
+                                phi_character = "runif(1)",
+                                ndraws = 1000)
+# Plot versus phi
+plot(ppmm_bayes$phi, ppmm_bayes$muY_ns)
+# posterior median and 95% CrI for probability sample mean Y
+est_ppmm <- median(ppmm_bayes$muY_ns)
+# credible interval
+lb_ppmm <- as.numeric(quantile(ppmm_bayes$muY_ns, 0.025))
+ub_ppmm <- as.numeric(quantile(ppmm_bayes$muY_ns, 0.975))
+
+est_ppmm
+c(lb_ppmm, ub_ppmm)
+```
+
+## True mean based on NHIS 
+
+```{r}
+nhiswt <- svymean(~phq2, design = nhis.design, na.rm = TRUE)[1]
+nhiswt
+confint(svymean(~phq2, design = nhis.design, na.rm = TRUE))
+```
+
+## Summary table
+
+```{r}
+summary <- tibble(est_naive, lb_naive, ub_naive,
+                  est_hpswt, lb_hpswt, ub_hpswt,
+                  est_ppmmreg, lb_ppmmreg, ub_ppmmreg,
+                  est_ppmmreg.phi1, lb_ppmmreg.phi1, ub_ppmmreg.phi1,
+                  est_mi, lb_mi, ub_mi,
+                  est_ipw, lb_ipw, ub_ipw,
+                  est_dr, lb_dr, ub_dr,
+                  est_ppmm, lb_ppmm, ub_ppmm) %>%
+  pivot_longer(everything(), names_to = c(".value", "method"), names_sep="_" )
+
+summary <- bind_rows(tibble(method = "truth (NHIS wtd)", 
+                            est = as.numeric(nhiswt)), 
+                     summary) %>%
+  mutate(method_f = factor(method,
+                           levels = c("truth (NHIS wtd)", "naive", "hpswt", "mi", "ipw", "dr", "ppmm", "ppmmreg", "ppmmreg.phi1")))
+summary %>%
+  arrange(method_f) %>%
+  dplyr::select(-method_f) %>%
+  kableExtra::kbl(digits = 3) %>%
+  kableExtra::kable_classic("striped", full_width = FALSE)
+```
+
+```{r}
+summary %>%
+  filter(method != "truth (NHIS wtd)") %>%
+  ggplot(aes(x = est, y = fct_rev(method_f))) + 
+  geom_point() +
+  geom_errorbar(aes(xmin = lb, xmax = ub), width = 0.2) +
+  coord_cartesian(xlim = c(0, 1.5)) + 
+  geom_vline(aes(xintercept = nhiswt), linetype = 2) + 
+  labs(xy = "Estimate and 95% Interval", y = " ")
+```
+
+
+
