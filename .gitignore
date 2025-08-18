@@ -3,6 +3,10 @@
 .RData
 .Ruserdata
 .DS_Store
-example_HPS/old/
 example_NSFG/old/
+example_HPS/old/
+example_HPS/HPS2023/
+example_HPS/NHIS2023/
+example_HPS/dataprep_hps2023.sas
+example_HPS/dataprep_nhis2023.sas
 simulation/simulation_design.docx

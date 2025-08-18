@@ -1,0 +1,353 @@
+---
+title: "NSFG Compare Two Approaches"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(jtools)
+library(dplyr)
+library(tidyverse)
+# install.packages("devtools")
+# devtools::install_github("randridge/ppmm")
+library(ppmm)
+library(nonprobsvy)
+library(haven)
+library(mice)
+library(mitools)
+
+```
+
+# Data Prep - NSFG data
+
+```{r}
+# NSFG full "population"
+nsfg <- read.csv("./nsfgdata.csv", h=T) %>%
+  # remove few cases with missing Y (wrk12mos) values
+  filter(!is.na(wrk12mos)) %>%
+# dummy variables 
+  mutate(Hisp = ifelse(race=="Hisp", 1, 0),
+         Black = ifelse(race=="Black", 1, 0),
+         Other = ifelse(race=="Other", 1, 0),
+         agecat1 = ifelse(agecat==1, 1, 0),
+         agecat2 = ifelse(agecat==2, 1, 0),
+         agecat3 = ifelse(agecat==3, 1, 0),
+         educat1 = ifelse(educat==1, 1, 0),
+         educat2 = ifelse(educat==2, 1, 0),
+         educat3 = ifelse(educat==3, 1, 0),
+         educat4 = ifelse(educat==4, 1, 0),
+         marcat2 = ifelse(marcat==2, 1, 0),
+         marcat3 = ifelse(marcat==3, 1, 0),
+         marcat4 = ifelse(marcat==4, 1, 0),
+         census_region1 = ifelse(census_region== "Midwest", 1, 0),
+         census_region2 = ifelse(census_region== "Northeast", 1, 0),
+         census_region3 = ifelse(census_region== "South", 1, 0),
+         census_region4 = ifelse(census_region== "West", 1, 0),
+         inccat1 = ifelse(inccat==1, 1, 0),
+         inccat2 = ifelse(inccat==2, 1, 0),
+         inccat3 = ifelse(inccat==3, 1, 0))
+
+# selected sample: smartphone users in lowest education category
+sp1 <- subset(nsfg, smartphone==1 & educat==1) %>%
+    dplyr::select(wrk12mos,
+                  male, agecat2, agecat3, Hisp, Other, marcat2, marcat3, marcat4, 
+                  census_region2, census_region3, census_region4, inccat2, inccat3, kidflag, rwrkst)
+
+# non-selected sample (could be prob sample more generally)
+sp0 <- subset(nsfg, smartphone != 1 | educat != 1) %>%
+    dplyr::select(wrk12mos,
+                  male, agecat2, agecat3, Hisp, Other, marcat2, marcat3, marcat4, 
+                  census_region2, census_region3, census_region4, inccat2, inccat3, kidflag, rwrkst)
+
+# selection fraction
+nrow(sp1)/nrow(nsfg)
+```
+
+# Fit models Y|Z,S and estimate true bias in regression coefficients
+
+Y variable: number of hours worked
+
+Z variables: sex (binary), age (3-level)
+
+A variables: race (3-level), marital status (4-level), Census region (4-level), income (3-level), child <16 in HH (binary), employed (binary)
+
+```{r}
+# Model for Y|Z,S=1 
+mod0 <- lm(wrk12mos ~ male + agecat2 + agecat3, data=sp0)
+summary(mod0)$coefficients %>% round(4)
+
+# Model for Y|Z,S=0
+mod1 <- lm(wrk12mos ~ male + agecat2 + agecat3, data=sp1)
+summary(mod1)$coefficients %>% round(4)
+
+# Model for Y|Z
+modfull <- lm(wrk12mos ~ male + agecat2 + agecat3, data=nsfg)
+summary(modfull)$coefficients %>% round(4)
+
+# compare selected to non-selected
+mod1$coefficients - mod0$coefficients
+
+# estimated bias (selected to full population)
+mod1$coefficients - modfull$coefficients
+```
+
+# MUB index computations for regression coefficients
+
+```{r}
+source("https://raw.githubusercontent.com/bradytwest/IndicesOfNISB/refs/heads/master/mub_reg_v3.R")
+source("https://raw.githubusercontent.com/bradytwest/IndicesOfNISB/refs/heads/master/mub_reg_bayes_local.R")
+
+#### summary statistics for non-selected cases
+#### stats_not_selected -- named list with 3 components:
+####       (1) n_ns -- sample size for non-selected sample
+####       (2) mean_ZA_ns -- vector of means for (in order) Z vars, A vars for non-selected sample
+####       (3) var_ZA_ns -- covariance matrix for (in order) Z vars, A vars for non-selected sample
+stats_not_selected <- list(n_ns = nrow(sp0),
+                           mean_ZA_ns = colMeans(sp0[,-1]),
+                           var_ZA_ns = var(sp0[,-1]))
+
+### summary statistics for selected sample
+### stats_selected -- named list with 3 components:
+####       (1) n_s -- sample size for selected sample
+####       (2) mean_YZA_s -- vector of means for (in order) Y, Z vars, A vars for selected sample
+####       (3) var_YZA_s -- covariance matrix for (in order) Y, Z vars, A vars for selected sample
+stats_selected <- list(n_s = nrow(sp1),
+                       mean_YZA_s = colMeans(sp1),
+                       var_YZA_s = var(sp1))
+
+# Non-Bayesian calculations
+mub_reg(stats_selected, stats_not_selected, nZvars = 3) %>% round(3)
+
+# Bayesian calculations
+set.seed(6754)
+NDRAWS <- 1000
+results_nsfg <- mub_reg_bayes(stats_selected, stats_not_selected, zparams = 3, ndraws=NDRAWS)
+quantile(results_nsfg$mubdraws[,1], c(0.025,0.5,0.975)) %>% round(3)
+quantile(results_nsfg$mubdraws[,2], c(0.025,0.5,0.975)) %>% round(3)
+quantile(results_nsfg$mubdraws[,3], c(0.025,0.5,0.975)) %>% round(3)
+quantile(results_nsfg$mubdraws[,4], c(0.025,0.5,0.975)) %>% round(3)
+```
+
+# Inference using new prediction idea
+
+```{r}
+# Extract only Z variables of interest from non-selected sample, adding column of 1s for intercept
+n_sp0 <- nrow(sp0)
+zmat0 <- as.matrix(cbind(int=rep(1,n_sp0), sp0[,c("male","agecat2","agecat3")]))
+
+# initialize vectors to hold draws
+regmean <- regmean_ns <- vector(length = NDRAWS)
+
+set.seed(818181)
+# compute new predictions for non-selected cases for each draw of adjusted coefs.
+for (i in 1:NDRAWS)
+{
+  
+  # Compute adjusted estimates of coefficients based on this draw
+  coefvec <- results_nsfg$betadraws[i,]
+  
+  # Compute predictions for each case in the non-selected data set by drawing from posterior predictive dist
+  # with appropriate residual variance
+  sp0_pred <- as.vector(zmat0 %*% coefvec) + rnorm(n_sp0, mean = 0, sd = sqrt(results_nsfg$residdraws[i]))
+
+  # estimated NS mean
+  regmean_ns[i] <- mean(sp0_pred)
+  
+  # estimated overall mean (S+NS)
+  regmean[i] <- mean(c(sp0_pred, sp1$wrk12mos))
+}
+rm(coefvec, sp0_pred)
+```
+
+
+```{r}
+# estimates of bias
+regbias <- regmean - mean(nsfg$wrk12mos)
+regbias_ns <- regmean_ns - mean(sp0$wrk12mos)
+
+# compute mean of bias estimates across all draws
+# overall mean
+mean(regbias); median(regbias)
+
+# estimate of overall mean
+mean(regmean); median(regmean)
+# 95% credible interval
+quantile(regmean, 0.025)
+quantile(regmean, 0.975)
+# true overall mean
+mean(nsfg$wrk12mos)
+```
+
+# SMUB approach
+
+Estimating mean of Y using all Z and A variables as predictors
+
+```{r}
+# Bayes approach
+stats_selected_smub <- list(mean_YZ = stats_selected$mean_YZA_s,
+                            var_YZ = stats_selected$var_YZA_s,
+                            n_YZ = stats_selected$n_s)
+stats_not_selected_sumb <- list(mean_Z = stats_not_selected$mean_ZA_ns,
+                                var_Z = stats_not_selected$var_ZA_ns,
+                                n_Z = stats_not_selected$n_ns)
+
+# Apply fully Bayesian approach to NSFG data
+set.seed(2282)
+ppmm_bayes <- ppmm::means_bayes(stats_selected_smub,
+                                stats_not_selected_sumb,
+                                phi_character = "runif(1)",
+                                ndraws = NDRAWS)
+```
+
+
+```{r}
+### Estimates from underlying PPMM
+ppmmmean <- ppmm_bayes$muY
+ppmmmean_ns <- ppmm_bayes$muY_ns
+
+# estimates of bias
+ppmmbias <- ppmmmean - mean(nsfg$wrk12mos)
+ppmmbias_ns <- ppmmmean_ns - mean(sp0$wrk12mos)
+
+# compute mean of bias estimates across all draws
+# overall mean
+mean(ppmmbias); median(ppmmbias)
+
+# estimate of overall mean
+mean(ppmmmean); median(ppmmmean)
+
+# true overall mean
+mean(nsfg$wrk12mos)
+```
+
+
+```{r}
+## Estimates from using the median SMUB to adjust estimates
+smubmean <- mean(sp1$wrk12mos) - ppmm_bayes$smub*sd(sp1$wrk12mos)
+
+# estimates of bias
+smubbias <- smubmean - mean(nsfg$wrk12mos)
+
+# compute mean of bias estimates across all draws
+# overall mean
+mean(smubbias); median(smubbias)
+
+# estimate of overall mean
+mean(smubmean); median(smubmean)
+
+# 95% credible interval
+quantile(smubmean, 0.025)
+quantile(smubmean, 0.975)
+
+# true overall mean
+mean(nsfg$wrk12mos)
+```
+# DR approach in nonprobsvy
+
+```{r}
+
+# Naive SRS estimate
+samp.des <- svydesign(ids = ~1, data = sp1, weights = ~1)
+svymean(~wrk12mos, samp.des)
+confint(svymean(~wrk12mos, samp.des))
+
+# survey design object for reference sample
+pop.des <- svydesign(ids = ~1, data = sp0, weights = ~1)
+
+nonprob(
+  selection = ~ male + agecat2 + agecat3 + Hisp + Other + marcat2 + marcat3 + marcat4 + census_region2 + census_region3 + census_region4 + inccat2 + inccat3 + kidflag + rwrkst, 
+  outcome = wrk12mos ~ male + agecat2 + agecat3 + Hisp + Other + marcat2 + marcat3 + marcat4 + census_region2 + census_region3 + census_region4 + inccat2 + inccat3 + kidflag + rwrkst, 
+  data = sp1, 
+  svydesign = pop.des, 
+  method_outcome = "glm", 
+  family_outcome = "gaussian"
+)
+```
+
+# Competing MI approach (assumes MAR)
+
+```{r}
+
+sp1$selected <- 1
+sp0$selected <- 0
+
+stacked <- sp1 %>% bind_rows(sp0)
+  
+stacked$wrk12mos[stacked$selected == 0] <- NA
+
+#md.pattern(stacked)
+
+# initial setting for imputation
+impm1 = mice(stacked, n.imp = 5, seed = 2025, maxit = 1)
+
+pred = impm1$predictorMatrix
+
+# impute using Bayesian linear regression (MAR) and generate 5 imputed datasets
+impm2 = mice(
+  stacked,
+  pred = pred,
+  method = "norm",
+  n.imp = 5,
+  seed = 2025,
+  maxit = 15
+)
+
+# get the long data, and the original dataset is included with include=TRUE
+longm1 = complete(impm2, action = 'long', include = TRUE)
+
+# prepare for combined inferences
+impm1a = as.mids(longm1)
+
+# extract the 5 imputed datasets
+mice.imp2 <- lapply(seq(impm1a$m),function(im) complete(impm1a,im))
+mice.imp2 <- imputationList(mice.imp2) 
+
+# MI inference, no weights or design features
+svy.df_imp <- svydesign(id=~1,weights=~1,data=mice.imp2)  
+summary(svy.df_imp)
+
+con_0 = with(svy.df_imp, svymean(
+  ~ wrk12mos,
+  se = T,
+  na.rm = T,
+  ci = T
+))
+con_0
+summary(MIcombine(con_0))
+```
+
+# Plots
+
+```{r}
+theme_set(theme_bw())
+
+res <- tibble(method = c(rep("REG", NDRAWS), rep("SMUB-adj", NDRAWS)), estmean = c(regmean, smubmean), estbias = c(regbias, smubbias))
+
+set.seed(4372834)
+res %>%
+  ggplot(aes(x=method, y=estmean)) + geom_jitter(width=0.05, shape=1) + geom_hline(yintercept = mean(nsfg$wrk12mos))
+```
+
+```{r}
+# Regression coefficients in NS sample from regression approach
+hist(results_nsfg$betadraws[,1]); abline(v=mod0$coefficients[1], col=2)
+hist(results_nsfg$betadraws[,2]); abline(v=mod0$coefficients[2], col=2)
+hist(results_nsfg$betadraws[,3]); abline(v=mod0$coefficients[3], col=2)
+hist(results_nsfg$betadraws[,4]); abline(v=mod0$coefficients[4], col=2)
+plot(results_nsfg$phidraws, results_nsfg$betadraws[,1]); abline(h=mod0$coefficients[1], col=2)
+plot(results_nsfg$phidraws, results_nsfg$betadraws[,2]); abline(h=mod0$coefficients[2], col=2)
+plot(results_nsfg$phidraws, results_nsfg$betadraws[,3]); abline(h=mod0$coefficients[3], col=2)
+plot(results_nsfg$phidraws, results_nsfg$betadraws[,4]); abline(h=mod0$coefficients[4], col=2)
+```
+
+```{r}
+# Correlation from SMUB approach
+hist(ppmm_bayes$rho_XY_s)
+```
+
+```{r}
+# Correlation from regression approach
+hist(results_nsfg$rhodraws)
+```
+
