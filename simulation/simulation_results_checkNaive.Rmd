@@ -1,0 +1,89 @@
+---
+title: "Simulation - Results"
+output: html_document
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, out.width = "100%")
+library(tidyverse)
+library(kableExtra)
+theme_set(theme_bw())
+
+# Read in simulation parms (and pop truth) -----
+load("./simdata/simParms.RData")
+
+# Read in gold standard / naive estimators ----
+getres <- function(x)
+{
+  load(x)
+  return(res)
+}
+filelist <- fs::dir_ls("./simresults/", regexp = "gold")
+stack <- filelist %>% 
+  map(\(x) getres(x)) %>%
+  list_rbind()
+
+# Merge with parms (includes truth) ----
+stack <- parms %>%
+  dplyr::select(pop, mech, rho_ya.z, or_y, or_a,
+                mu, B0, B1, B2) %>%
+  right_join(stack)
+```
+
+# Estimated Mean of Y
+
+```{r}
+# Calculate empirical bias, coverage
+stack <- stack %>%
+  mutate(bias_P = est_P - mu,
+         cover_P = (lb_P < mu & ub_P > mu),
+         bias_NP = est_NP - mu,
+         cover_NP = (lb_NP < mu & ub_NP > mu))
+
+stack %>%
+  group_by(pop, mech) %>%
+  summarize(nreps = n(),
+            mean_bias_P = mean(bias_P),
+            mean_bias_NP = mean(bias_NP),
+            coverage_P = mean(cover_P),
+            coverage_NP = mean(cover_NP)) %>%
+  kbl() %>%
+  kable_classic("striped")
+```
+
+# Bias of Reg Coef in NP Sample
+
+```{r}
+# Calculate bias
+stack <- 
+  stack %>%
+  mutate(bias_B0_P = B0_P - B0,
+         bias_B1_P = B1_P - B1,
+         bias_B2_P = B2_P - B2,
+         bias_B0_NP = B0_NP - B0,
+         bias_B1_NP = B1_NP - B1,
+         bias_B2_NP = B2_NP - B2)
+
+stack %>%
+  group_by(pop, mech, B0, B1, B2) %>%
+  summarize(nreps = n(),
+            mean_bias_B0_P = mean(bias_B0_P),
+            mean_bias_B1_P = mean(bias_B1_P),
+            mean_bias_B2_P = mean(bias_B2_P),
+            mean_bias_B0_NP = mean(bias_B0_NP),
+            mean_bias_B1_NP = mean(bias_B1_NP),
+            mean_bias_B2_NP = mean(bias_B2_NP)) %>%
+  ungroup() %>%
+  mutate(relbias_B0_P = 100*mean_bias_B0_P/B0,
+         relbias_B1_P = 100*mean_bias_B1_P/B1,
+         relbias_B2_P = 100*mean_bias_B2_P/B2,
+         relbias_B0_NP = 100*mean_bias_B0_NP/B0,
+         relbias_B1_NP = 100*mean_bias_B1_NP/B1,
+         relbias_B2_NP = 100*mean_bias_B2_NP/B2) %>%
+  dplyr::select(pop, mech, starts_with("relbias")) %>%
+  kbl(digits = 2) %>%
+  kable_classic("striped")
+
+```
+

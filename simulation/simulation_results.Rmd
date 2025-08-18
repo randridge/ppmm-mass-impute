@@ -1,0 +1,507 @@
+---
+title: "Simulation - Results"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, out.width = "100%")
+library(tidyverse)
+library(kableExtra)
+theme_set(theme_bw())
+pd <- position_dodge(0.5)
+
+# Read in simulation parms (and pop truth) -----
+load("./simdata/simParms.RData")
+parms <- parms %>%
+  dplyr::select(pop, mech, 
+                rho_ya.z, or_y, or_a,
+                mu)
+
+# Read in all estimators ----
+getres <- function(x)
+{
+  load(x)
+  return(res)
+}
+# Gold standard and Naive NP estimator
+filelist <- fs::dir_ls("./simresults/", regexp = "gold")
+stack_gold <- filelist %>% 
+  map(\(x) getres(x)) %>%
+  list_rbind() %>%
+  dplyr::select(pop, mech, est_P:ub_P, est_NP:ub_NP) %>%
+  group_by(pop, mech) %>%
+  mutate(rep = 1:n()) %>%
+  ungroup()
+# PPMM methods
+filelist <- fs::dir_ls("./simresults/", regexp = "ppmm")
+stack_ppmm <- filelist %>% 
+  map(\(x) getres(x)) %>%
+  list_rbind() %>%
+  group_by(pop, mech) %>%
+  mutate(rep = 1:n()) %>%
+  ungroup()
+# Chen methods
+filelist <- fs::dir_ls("./simresults/", regexp = "chen")
+stack_chen <- filelist %>% 
+  map(\(x) getres(x)) %>%
+  list_rbind() %>%
+  group_by(pop, mech) %>%
+  mutate(rep = 1:n()) %>%
+  ungroup()
+# Shadow variable methods
+filelist <- fs::dir_ls("./simresults/", regexp = "shadow")
+stack_shadow <- filelist %>% 
+  map(\(x) getres(x)) %>%
+  list_rbind() %>%
+  group_by(pop, mech) %>%
+  mutate(rep = 1:n()) %>%
+  ungroup()
+
+# Merge estimators -----
+all <- stack_gold %>%
+  left_join(stack_ppmm) %>%
+  left_join(stack_chen) %>%
+  left_join(stack_shadow)
+rm(stack_chen, stack_gold, stack_ppmm, stack_shadow, filelist, getres)
+
+# Make long and merge in parms -----
+long <- all %>% 
+  dplyr::select(-c(starts_with("se"))) %>%
+  pivot_longer(-c(pop, mech, rep), 
+               names_to = c(".value", "method"), 
+               names_sep="_" ) %>%
+  left_join(parms) %>%
+  mutate(bias = est - mu,
+         relbias = bias/mu,
+         cover = (lb < mu & ub > mu),
+         width = ub - lb)
+```
+
+**Set 1: Ignorable selection with a shadow variable**
+
+OR(Y) = 1 and OR(A) = 1 --> 3 scenarios: Cor(Y,A|Z) = {0.2, 0.5, 0.8}
+
+**Set 2: Ignorable selection without a shadow variable**
+
+OR(Y) = 1 and OR(A) != 1 --> 6 scenarios: OR(A) = {1.1, 2} and Cor(Y,A|Z) = {0.2, 0.5, 0.8}
+
+**Set 3: Nonignorable selection with a shadow variable**
+
+OR(Y) != 1 and OR(A) = 1 --> 6 scenarios: OR(Y) = {1.1, 2} and Cor(Y,A|Z) = {0.2, 0.5, 0.8}
+
+**Set 4: Nonignorable selection without a shadow variable**
+
+OR(Y) != 1 and OR(A) != 1 --> 12 scenarios: OR(Y) = {1.1, 2} and OR(A) = {1.1, 2} and Cor(Y,A|Z) = {0.2, 0.5, 0.8}
+
+```{r}
+# summarize across replicates
+sumstats_all <- long %>%
+  group_by(pop, mech, mu, rho_ya.z, or_y, or_a, method) %>%
+  summarize(nreps = n(),
+            mean_bias = mean(bias),
+            sd_bias = sd(bias),
+            lb_bias = mean_bias - 1.96*sd_bias/sqrt(nreps),
+            ub_bias = mean_bias + 1.96*sd_bias/sqrt(nreps),
+            mean_cover = mean(cover),
+            sd_cover = sqrt(mean_cover*(1-mean_cover)),
+            lb_cover = pmax(0, mean_cover - 1.96*sd_cover/sqrt(nreps)),
+            ub_cover = pmin(1, mean_cover + 1.96*sd_cover/sqrt(nreps)),
+            mean_width = mean(width),
+            median_width = median(width)) %>%
+  ungroup() %>%
+  # Remove shadow var method that estimates combined P + NP
+  filter(method != "shadowdr") %>% 
+  mutate(relbias = 100*mean_bias/mu,
+         method_f = factor(method, 
+                           levels = c("P", "NP",
+                                      "chenmi","chenipw","chendr","ppmmreg0","ppmm0",
+                                      "ppmmreg1","shadowdrP",
+                                      "ppmmreg","ppmm","ppmm1"), 
+                           labels = c("Prob Samp Est", "Naive NP Est",
+                                      "MI", "IPW", "DR", "PPMM-Reg(\u03c6=0)", "SMUB(\u03c6=0)",
+                                      "PPMM-Reg(\u03c6=1)", "Shadow Var",
+                                      "PPMM-Reg", "SMUB", "SMUB(\u03c6=1)")),
+         set = case_when(or_y == 1 & or_a == 1 ~ 1,
+                         or_y == 1 & or_a != 1 ~ 2,
+                         or_y != 1 & or_a == 1 ~ 3,
+                         or_y != 1 & or_a != 1 ~ 4),
+         set_f = case_when(set == 1 ~ "Set 1: Ignorable w/Shadow Var",
+                           set == 2 ~ "Set 2: Ignorable w/o Shadow Var",
+                           set == 3 ~ "Set 3: Nonignorable w/Shadow Var",
+                           set == 4 ~ "Set 4: Nonignorable w/o Shadow Var"),
+         estimator_group = case_when(method %in% c("P", "NP") ~ " ",
+                                     method %in% c("chenmi","chenipw","chendr","ppmmreg0","ppmm0") ~ "Ignorable",
+                                     method %in% c("ppmmreg1","shadowdrP") ~ "Shadow",
+                                     method %in% c("ppmmreg","ppmm","ppmm1") ~ "Other")) %>%
+  mutate(estimator_group = fct_relevel(estimator_group, c(" ", "Ignorable", "Shadow", "Other")))
+
+sumstats <- sumstats_all
+
+# sumstats <- sumstats_all %>%
+#     filter(!(method %in% c("P")))
+
+# sumstats <- sumstats_all %>%
+#     filter(!(method %in% c("NP", "P")))
+
+# labels for facets
+rho_ya.z.labs <- c("Cor(Y,A|Z) = 0.2", "Cor(Y,A|Z) = 0.5", "Cor(Y,A|Z) = 0.8")
+names(rho_ya.z.labs) <- c("0.2", "0.5", "0.8")
+or_a.labs <- c("OR(A) = 1.1", "OR(A) = 2")
+names(or_a.labs) <- c(1.1, 2)
+or_y.labs <- c("OR(Y) = 1.1", "OR(Y) = 2")
+names(or_y.labs) <- c(1.1, 2)
+```
+
+Notes:
+
+* When OR(Y) = 1 --> Selection is **ignorable**  
+  * phi=0 for PPMM/PPMM-Reg  
+  * Chen methods should work  
+* When OR(Y) > 1 --> Selection is **nonignorable**   
+  * phi>1 for PPMM/PPMM-Reg  
+* When OR(A) = 1 --> A **is** a shadow variable  
+  * phi=1 for PPMM-Reg, 0<phi<1 for PPMM  
+* When OR(A) > 1 --> A **is not** a shadow variable   
+  * phi<1 for PPMM-Reg, 0<phi<1 for PPMM
+
+## Set 1: Ignorable w/Shadow Variable
+
+OR(Y) = 1 and OR(A) = 1 --> 3 scenarios: Cor(Y,A|Z) = {0.2, 0.5, 0.8}
+
+Methods that should be unbiased are:
+
+* PPMM-Reg(phi=0)  
+* PPMM(phi=0)  
+* Chen methods (DR, IPW, MI)  
+* Shadow Variable (P)
+
+### Bias
+
+```{r, fig.asp=0.4}
+# sumstats %>%
+#   filter(set == 1) %>%
+#   ggplot(aes(y = fct_rev(method_f), x = mean_bias)) + 
+#   geom_point(size = 1, position = pd) + 
+#   geom_errorbar(aes(xmin = lb_bias, xmax = ub_bias), position = pd, width = 0.3) + 
+#   geom_vline(xintercept = 0, linetype = 2, color = "grey50") + 
+#   labs(x = "Bias", y = " ") + 
+#   facet_grid(estimator_group ~ rho_ya.z, 
+#              labeller = labeller(rho_ya.z = rho_ya.z.labs, estimator_group = label_value), 
+#              scales = "free", space = "free_y") +
+#   theme(strip.background.y = element_blank(),
+#         panel.spacing.y = unit(0,"cm"))
+```
+
+```{r, fig.asp=0.5}
+sumstats %>%
+  filter(set == 1) %>%
+  ggplot(aes(y = fct_rev(method_f), x = mean_bias, color = factor(rho_ya.z), shape = factor(rho_ya.z))) + 
+  geom_point(size = 1, position = pd) + 
+  geom_errorbar(aes(xmin = lb_bias, xmax = ub_bias), position = pd, width = 0.3) + 
+  geom_vline(xintercept = 0, linetype = 2, color = "grey50") + 
+  labs(x = "Empirical Bias", y = " ", color = "Cor(Y,A|Z)", shape = "Cor(Y,A|Z)") + 
+  facet_grid(estimator_group ~ ., 
+             scales = "free", space = "free_y") + 
+  theme(strip.background.y = element_blank(),
+        panel.spacing.y = unit(0,"cm"))
+ggsave("./plots/set1_bias.png", width = 8, height = 4)
+```
+
+<!-- ### Relative Bias -->
+
+```{r, fig.asp=0.4, include = FALSE}
+# sumstats %>%
+#   filter(set == 1) %>%
+#   ggplot(aes(y = fct_rev(method_f), x = relbias)) + 
+#   geom_point(size = 1, position = pd) + 
+#   geom_errorbarh(aes(xmin = 0, xmax = relbias), position = pd, height = 0) + 
+#   geom_vline(xintercept = 0, linetype = 2, color = "grey50") + 
+#   labs(x = "Relative Bias (%)", y = " ") + 
+#   facet_grid(. ~ rho_ya.z, labeller = label_both, scales = "free_x")
+```
+
+### Coverage
+
+```{r, fig.asp=0.5}
+sumstats %>%
+  filter(set == 1) %>%
+  filter(!is.na(mean_cover)) %>%
+  ggplot(aes(y = fct_rev(method_f), x = mean_cover, color = factor(rho_ya.z), shape = factor(rho_ya.z))) + 
+  geom_point(size = 1, position = pd) + 
+  geom_errorbar(aes(xmin = lb_cover, xmax = ub_cover), position = pd, width = 0.2) + 
+  geom_vline(xintercept = 0.95, linetype = 2, color = "grey50") + 
+  labs(x = "Empirical Coverage of 95% Intervals", y = " ", color = "Cor(Y,A|Z)", shape = "Cor(Y,A|Z)") + 
+  theme(legend.position = "right") + 
+  facet_grid(estimator_group ~ ., labeller = label_value, 
+             scales = "free", space = "free_y") +
+  theme(strip.background.y = element_blank(),
+        panel.spacing.y = unit(0,"cm")) +
+  scale_x_continuous(breaks = c(.4, .5, .6, .7, .8, .9, 1), labels = c(".4", ".5", ".6", ".7", ".8", ".9", "1"))
+ggsave("./plots/set1_coverage.png", width = 8, height = 4)
+```
+
+### CI Width
+
+```{r, fig.asp=0.5}
+sumstats %>%
+  filter(!is.na(median_width)) %>%
+  filter(set == 1) %>%
+  ggplot(aes(y = fct_rev(method_f), x = median_width, color = factor(rho_ya.z), shape = factor(rho_ya.z))) + 
+  geom_point(size = 1, position = pd) + 
+  geom_errorbarh(aes(xmin = 0, xmax = median_width), position = pd, height = 0) + 
+  geom_vline(xintercept = 0, linetype = 1, color = "grey50") + 
+  labs(x = "Median CI Width", y = " ", color = "Cor(Y,A|Z)", shape = "Cor(Y,A|Z)") + 
+  theme(legend.position = "right") + 
+  facet_grid(estimator_group ~ ., 
+             labeller = label_value, 
+             scales = "free", space = "free_y") +
+  theme(strip.background.y = element_blank(),
+        panel.spacing.y = unit(0,"cm"))
+ggsave("./plots/set1_ciwidth.png", width = 8, height = 4)
+```
+
+## Set 2: Ignorable w/NO Shadow Variable
+
+OR(Y) = 1 and OR(A) != 1 --> 6 scenarios: OR(A) = {1.1, 2} and Cor(Y,A|Z) = {0.2, 0.5, 0.8}
+
+Methods that should be unbiased are:
+
+* PPMM-Reg(phi=0)  
+* PPMM(phi=0)  
+* Chen methods (DR, IPW, MI)  
+
+### Bias
+
+```{r, fig.asp=0.5}
+sumstats %>%
+  filter(set == 2) %>%
+  ggplot(aes(y = fct_rev(method_f), x = mean_bias, color = factor(rho_ya.z), shape = factor(rho_ya.z))) + 
+  geom_point(size = 1, position = pd) + 
+  geom_errorbar(aes(xmin = lb_bias, xmax = ub_bias), position = pd, width = 0.3) + 
+  geom_vline(xintercept = 0, linetype = 2, color = "grey50") + 
+  labs(x = "Empirical Bias", y = " ", color = "Cor(Y,A|Z)", shape = "Cor(Y,A|Z)") + 
+  facet_grid(estimator_group ~ or_a, 
+             labeller = labeller(or_a = or_a.labs), 
+             scales = "free", space = "free_y") + 
+  theme(strip.background.y = element_blank(),
+        panel.spacing.y = unit(0,"cm"))
+ggsave("./plots/set2_bias.png", width = 8, height = 4)
+```
+
+### Coverage
+
+```{r, fig.asp=0.5}
+sumstats %>%
+  filter(set == 2) %>%
+  filter(!is.na(mean_cover)) %>%
+  ggplot(aes(y = fct_rev(method_f), x = mean_cover, color = factor(rho_ya.z), shape = factor(rho_ya.z))) + 
+  geom_point(size = 1, position = pd) + 
+  geom_errorbar(aes(xmin = lb_cover, xmax = ub_cover), position = pd, width = 0.2) + 
+  geom_vline(xintercept = 0.95, linetype = 2, color = "grey50") + 
+  labs(x = "Empirical Coverage of 95% Intervals", y = " ", color = "Cor(Y,A|Z)", shape = "Cor(Y,A|Z)") + 
+  theme(legend.position = "right") +
+  facet_grid(estimator_group ~ or_a, labeller = labeller(or_a = or_a.labs), scales = "free_y", space = "free_y") + 
+  theme(strip.background.y = element_blank(),
+        panel.spacing.y = unit(0,"cm")) + 
+  scale_x_continuous(breaks = c(0, .25, .5, .75, 1), labels = c("0", ".25", ".5", ".75", "1"))
+ggsave("./plots/set2_coverage.png", width = 8, height = 4)
+```
+
+### CI Width
+
+```{r, fig.asp=0.5}
+sumstats %>%
+  filter(!is.na(median_width)) %>%
+  filter(set == 2) %>%
+  ggplot(aes(y = fct_rev(method_f), x = median_width, color = factor(rho_ya.z), shape = factor(rho_ya.z))) + 
+  geom_point(size = 1, position = pd) + 
+  geom_errorbarh(aes(xmin = 0, xmax = median_width), position = pd, height = 0) + 
+  geom_vline(xintercept = 0, linetype = 1, color = "grey50") + 
+  labs(x = "Median CI Width", y = " ", color = "Cor(Y,A|Z)", shape = "Cor(Y,A|Z)") + 
+  theme(legend.position = "right") +
+  facet_grid(estimator_group ~ or_a, labeller = labeller(or_a = or_a.labs), scales = "free_y", space = "free_y") + 
+  theme(strip.background.y = element_blank(),
+        panel.spacing.y = unit(0,"cm"))
+ggsave("./plots/set2_ciwidth.png", width = 8, height = 4)
+```
+
+## Set 3: Non-Ignorable w/Shadow Variable
+
+OR(Y) != 1 and OR(A) = 1 --> 6 scenarios: OR(Y) = {1.1, 2} and Cor(Y,A|Z) = {0.2, 0.5, 0.8}
+
+Methods that should be unbiased are:
+
+* PPMM-Reg(phi=1)  
+* Shadow Variable (P)  
+
+### Bias
+
+```{r}
+# sumstats %>%
+#   filter(set == 3) %>%
+#   ggplot(aes(y = fct_rev(method_f), x = mean_bias)) + 
+#   geom_point(size = 1, position = pd) + 
+#   geom_errorbar(aes(xmin = lb_bias, xmax = ub_bias), position = pd, width = 0.3) + 
+#   geom_vline(xintercept = 0, linetype = 2, color = "grey50") + 
+#   labs(x = "Bias", y = " ") + 
+#   facet_grid(or_y ~ rho_ya.z, 
+#              labeller = labeller(or_y = or_y.labs, rho_ya.z = rho_ya.z.labs), 
+#              scales = "free_x")
+```
+
+```{r, fig.asp=0.5}
+sumstats %>%
+  filter(set == 3) %>%
+  ggplot(aes(y = fct_rev(method_f), x = mean_bias, color = factor(rho_ya.z), shape = factor(rho_ya.z))) + 
+  geom_point(size = 1, position = pd) + 
+  geom_errorbar(aes(xmin = lb_bias, xmax = ub_bias), position = pd, width = 0.3) + 
+  geom_vline(xintercept = 0, linetype = 2, color = "grey50") + 
+  labs(x = "Bias", y = " ", color = "Cor(Y,A|Z)", shape = "Cor(Y,A|Z)") + 
+  facet_grid(estimator_group ~ or_y, 
+             labeller = labeller(or_y = or_y.labs), 
+             scales = "free", space = "free_y") + 
+  theme(strip.background.y = element_blank(),
+        panel.spacing.y = unit(0,"cm"))
+ggsave("./plots/set3_bias.png", width = 8, height = 4)
+```
+
+### Coverage
+
+```{r, fig.asp=0.5}
+sumstats %>%
+  filter(set == 3) %>%
+  filter(!is.na(mean_cover)) %>%
+  ggplot(aes(y = fct_rev(method_f), x = mean_cover, color = factor(rho_ya.z), shape = factor(rho_ya.z))) + 
+  geom_point(size = 1, position = pd) + 
+  geom_errorbar(aes(xmin = lb_cover, xmax = ub_cover), position = pd, width = 0.2) + 
+  geom_vline(xintercept = 0.95, linetype = 2, color = "grey50") + 
+  labs(x = "Empirical Coverage of 95% Intervals", y = " ", color = "Cor(Y,A|Z)", shape = "Cor(Y,A|Z)") + 
+  theme(legend.position = "right") +
+  facet_grid(estimator_group ~ or_y, 
+             labeller = labeller(or_y = or_y.labs), 
+             scales = "free_y", space = "free_y") + 
+  theme(strip.background.y = element_blank(),
+        panel.spacing.y = unit(0,"cm")) + 
+  scale_x_continuous(breaks = c(0, .25, .5, .75, 1), labels = c("0", ".25", ".5", ".75", "1"))
+ggsave("./plots/set3_coverage.png", width = 8, height = 4)
+```
+
+### CI Width
+
+```{r, fig.asp=0.5}
+sumstats %>%
+  filter(set == 3) %>%
+  filter(!is.na(median_width)) %>%
+  ggplot(aes(y = fct_rev(method_f), x = median_width, color = factor(rho_ya.z), shape = factor(rho_ya.z))) + 
+  geom_point(size = 1, position = pd) + 
+  geom_errorbarh(aes(xmin = 0, xmax = median_width), position = pd, height = 0) + 
+  geom_vline(xintercept = 0, linetype = 1, color = "grey50") + 
+  labs(x = "Median CI Width", y = " ", color = "Cor(Y,A|Z)", shape = "Cor(Y,A|Z)") + 
+  theme(legend.position = "right") +
+  facet_grid(estimator_group ~ or_y, 
+             labeller = labeller(or_y = or_y.labs), 
+             scales = "free_y", space = "free_y") + 
+  theme(strip.background.y = element_blank(),
+        panel.spacing.y = unit(0,"cm"))
+ggsave("./plots/set3_ciwidth.png", width = 8, height = 4)
+```
+
+## Set 4: Non-Ignorable w/NO Shadow Variable
+
+OR(Y) != 1 and OR(A) != 1 --> 12 scenarios: OR(Y) = {1.1, 2} and OR(A) = {1.1, 2} and Cor(Y,A|Z) = {0.2, 0.5, 0.8}
+
+No methods will be unbiased (b/c for PPMM and PPMM-Reg the phi value will be somewhere in {0,1})
+
+But PPMM and PPMM-Reg with uniform prior should have decent coverage
+
+### Bias
+
+```{r}
+# sumstats %>%
+#   filter(set == 4) %>%
+#   ggplot(aes(y = fct_rev(method_f), x = mean_bias, color = factor(or_a))) + 
+#   geom_point(size = 1, position = pd) + 
+#   geom_errorbar(aes(xmin = lb_bias, xmax = ub_bias), position = pd, width = 0.3) + 
+#   geom_vline(xintercept = 0, linetype = 2, color = "grey50") + 
+#   labs(x = "Bias", y = " ", color = "OR(A)") + 
+#   facet_grid(or_y ~ rho_ya.z, labeller = label_both, scales = "free_x")
+```
+
+```{r, fig.asp=0.5}
+sumstats %>%
+  filter(set == 4) %>%
+  ggplot(aes(y = fct_rev(method_f), x = mean_bias, color = factor(rho_ya.z), shape = factor(rho_ya.z))) + 
+  geom_point(size = 1, position = pd) + 
+  geom_errorbar(aes(xmin = lb_bias, xmax = ub_bias), position = pd, width = 0.3) + 
+  geom_vline(xintercept = 0, linetype = 2, color = "grey50") + 
+  labs(x = "Bias", y = " ", color = "Cor(Y,A|Z)", shape = "Cor(Y,A|Z)") + 
+  facet_grid(estimator_group ~ or_y + or_a, 
+             labeller = labeller(or_y = or_y.labs, or_a = or_a.labs), 
+             scales = "free", space = "free_y") + 
+  theme(strip.background.y = element_blank(),
+        panel.spacing.y = unit(0,"cm"))
+ggsave("./plots/set4_bias.png", width = 8, height = 4)
+```
+
+### Coverage
+
+```{r, fig.asp=0.5}
+# sumstats %>%
+#   filter(set == 4) %>%
+#   filter(!is.na(mean_cover)) %>%
+#   ggplot(aes(y = fct_rev(method_f), x = mean_cover, color = factor(or_a), shape = factor(or_a))) + 
+#   geom_point(size = 1, position = pd) + 
+#   geom_errorbar(aes(xmin = lb_cover, xmax = ub_cover), position = pd, width = 0.2) + 
+#   geom_vline(xintercept = 0.95, linetype = 2, color = "grey50") + 
+#   labs(x = "Empirical Coverage of 95% Intervals", y = " ", color = "OR(A)", shape = "OR(A)") + 
+#   facet_grid(or_y ~ rho_ya.z, labeller = label_both, scales = "free_x")
+sumstats %>%
+  filter(set == 4) %>%
+  filter(!is.na(mean_cover)) %>%
+  ggplot(aes(y = fct_rev(method_f), x = mean_cover, color = factor(rho_ya.z), shape = factor(rho_ya.z))) + 
+  geom_point(size = 1, position = pd) + 
+  geom_errorbar(aes(xmin = lb_cover, xmax = ub_cover), position = pd, width = 0.3) + 
+  geom_vline(xintercept = 0.95, linetype = 2, color = "grey50") + 
+  labs(x = "Empirical Coverage of 95% Intervals", y = " ", color = "Cor(Y,A|Z)", shape = "Cor(Y,A|Z)") + 
+  facet_grid(estimator_group ~ or_y + or_a, 
+             labeller = labeller(or_y = or_y.labs, or_a = or_a.labs), 
+             scales = "free", space = "free_y") + 
+  theme(strip.background.y = element_blank(),
+        panel.spacing.y = unit(0,"cm")) + 
+  scale_x_continuous(breaks = c(0, .25, .5, .75, 1), labels = c("0", ".25", ".5", ".75", "1"))
+ggsave("./plots/set4_coverage.png", width = 8, height = 4)
+```
+
+### CI Width
+
+```{r, fig.asp=0.5}
+# sumstats %>%
+#   filter(set == 4) %>%
+#   filter(!is.na(median_width)) %>%
+#   ggplot(aes(y = fct_rev(method_f), x = median_width, color = factor(rho_ya.z), shape = factor(rho_ya.z))) + 
+#   geom_point(size = 1, position = pd) + 
+#   geom_errorbarh(aes(xmin = 0, xmax = median_width), position = pd, height = 0) + 
+#   geom_vline(xintercept = 0, linetype = 1, color = "grey50") + 
+#   labs(x = "Median CI Width", y = " ", color = "Cor(Y,A|Z)", shape = "Cor(Y,A|Z)") + 
+#   theme(legend.position = "right") +
+#   facet_grid(or_y ~ or_a, labeller = label_both, scales = "free_x")
+sumstats %>%
+  filter(set == 4) %>%
+  filter(!is.na(median_width)) %>%
+  ggplot(aes(y = fct_rev(method_f), x = median_width, color = factor(rho_ya.z), shape = factor(rho_ya.z))) + 
+  geom_point(size = 1, position = pd) + 
+  geom_errorbarh(aes(xmin = 0, xmax = median_width), position = pd, height = 0) + 
+  geom_vline(xintercept = 0, linetype = 1, color = "grey50") + 
+  labs(x = "Median CI Width", y = " ", color = "Cor(Y,A|Z)", shape = "Cor(Y,A|Z)") + 
+  theme(legend.position = "right") +
+  facet_grid(estimator_group ~ or_y + or_a, 
+             labeller = labeller(or_y = or_y.labs, or_a = or_a.labs), 
+             scales = "free", space = "free_y") + 
+  theme(strip.background.y = element_blank(),
+        panel.spacing.y = unit(0,"cm"))
+ggsave("./plots/set4_ciwidth.png", width = 8, height = 4)
+```
