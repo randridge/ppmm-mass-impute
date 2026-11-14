@@ -4,4 +4,4 @@ Code to support:
 
 by Brady West and Rebecca Andridge
 
-Under review (8/2025)
+Accepted at JRSS-A (11/2026)
