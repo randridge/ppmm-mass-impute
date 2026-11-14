@@ -20,10 +20,12 @@
 #### ndraws -- number of draws
 ############################################
 #### Returns:
-#### dataframe (ndraws x zparams):
+#### list of:
 ####    mubdraws -- the draws of MUB for each Z variable (each column is a Z variable, in order with 1st column the intercept)
-####    betadraws -- draws of regression coefficients of Y|Z,S=0
-####    residdraws --- draws of residual error variance of Y|Z,S=0
+####    betadraws_ns -- draws of regression coefficients of Y|Z,S=0
+####    betadraws_s -- draws of regression coefficients of Y|Z,S=1
+####    residdraws_ns -- draws of residual error variance of Y|Z,S=0
+####    residdraws_s -- draws of residual error variance of Y|Z,S=1
 ####    phidraws --- draws of phi
 ####    rhodraws --- draws of Cor(Y,X|Z,S=1) [conditional proxy strength]
 ############################################
@@ -118,10 +120,12 @@ mub_reg_bayes <- function(stats_selected, stats_not_selected, zparams, userphi=N
   ###############
   # Matrix to hold draws of MUB(phi)
   mubdraws <- matrix(0, nrow=ndraws, ncol=(zparams+1))
-  # Matrix to hold draws of adjusted regression coef (NS)
-  betadraws <- matrix(0, nrow=ndraws, ncol=(zparams+1))
-  # Vector to hold draws of residual variance (NS)
-  residdraws <- vector(length=ndraws)
+  # Matrix to hold draws of regression coef for NS and S
+  betadraws_ns <- matrix(0, nrow=ndraws, ncol=(zparams+1))
+  betadraws_s <- matrix(0, nrow=ndraws, ncol=(zparams+1))
+  # Vector to hold draws of residual variance for NS and S
+  residdraws_s <- vector(length=ndraws)
+  residdraws_ns <- vector(length=ndraws)
   # Vector to hold draws of phi
   phidraws <- vector(length=ndraws)
   # Vector to hold draws of conditional correlation
@@ -248,8 +252,10 @@ mub_reg_bayes <- function(stats_selected, stats_not_selected, zparams, userphi=N
     mubdraws[d,2:(zparams+1)] <- g_d * sqrt(vratio_d) * (DRAW_beta_XZ.Z_s - DRAW_beta_XZ.Z_ns)
     
     # save other draws
-    betadraws[d,] <- c(DRAW_beta_Y0.Z_ns, DRAW_beta_YZ.Z_ns)
-    residdraws[d] <- DRAW_var_Y.Z_ns
+    betadraws_ns[d,] <- c(DRAW_beta_Y0.Z_ns, DRAW_beta_YZ.Z_ns)
+    betadraws_s[d,] <- c(DRAW_beta_Y0.Z_s, DRAW_beta_YZ.Z_s)
+    residdraws_ns[d] <- DRAW_var_Y.Z_ns
+    residdraws_s[d] <- DRAW_var_XY.Z_s[2,2]
     phidraws[d] <- phi
     rhodraws[d] <- DRAW_rho_XY.Z_s
   }
@@ -261,8 +267,10 @@ mub_reg_bayes <- function(stats_selected, stats_not_selected, zparams, userphi=N
     colnames(mubdraws)[1+j]  <- paste("index.B",j,sep="")
   }
   return(list(mubdraws = mubdraws,
-              betadraws = betadraws,
-              residdraws = residdraws,
+              betadraws_ns = betadraws_ns,
+              betadraws_s = betadraws_s,
+              residdraws_ns = residdraws_ns,
+              residdraws_s = residdraws_s,
               phidraws = phidraws,
               rhodraws = rhodraws))
 }

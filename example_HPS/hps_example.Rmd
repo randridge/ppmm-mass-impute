@@ -14,8 +14,9 @@ library(survey)
 # library(ppmm)
 library(nonprobsvy)
 # library(haven)
-# library(mice)
+library(mice)
 # library(mitools)
+library(rstanarm)
 options(knitr.kable.NA = '')
 
 source("../functions/mub_reg_bayes_local.R")
@@ -114,14 +115,22 @@ nhis <- read_csv("./microdata_nhis2023.csv") %>%
          # Anxiety score (GAD)
          gad2 = PHQ43_A + PHQ44_A - 2, #-2 necessary since vars are 1-4 but scoring uses 0-3
          )
-
-nhis$ccind <- nhis %>%
-  dplyr::select(male:gad2) %>%
+# indicator for complete data on proxy variable (gad2) and covariates
+nhis$ccindZA <- nhis %>%
+  dplyr::select(male:region_w, gad2) %>%
+  complete.cases()
+# indicator for complete data on covariates
+nhis$ccindZ <- nhis %>%
+  dplyr::select(male:region_w) %>%
   complete.cases()
 
 ```
 
 NHIS full sample size: `r nrow(nhis)`
+
+NHIS sample size with complete data for covariates (Z):  `r sum(nhis$ccindZ)`
+
+NHIS sample size with complete data for proxy variable (A) and covariates (Z):  `r sum(nhis$ccindZA)`
 
 # Summary of Variables Used
 
@@ -185,7 +194,8 @@ c(lb_hpswt, ub_hpswt)
 ## Proposed Approach
 
 ```{r}
-# summary statistics for NP sample (selected sample)
+# NP sample
+# subset to complete cases
 samp.NP <- hps %>%
   dplyr::select(phq2, # Y VARIABLE
                 male,
@@ -195,23 +205,21 @@ samp.NP <- hps %>%
                 region_ne, region_s, region_mw, # REF = region_w
                 gad2) %>%  #A VARIABLE
   drop_na()
+# summary stats
+stats_NP <- list(n_s = nrow(samp.NP),
+                 mean_YZA_s = colMeans(samp.NP),
+                 var_YZA_s = var(samp.NP))
 ```
 
 HPS sample size: n = `r nrow(hps)`
 
 After excluding missing Y, Z, or A values: n = `r nrow(samp.NP)`
 
-```{r}
-stats_NP <- list(n_s = nrow(samp.NP),
-                 mean_YZA_s = colMeans(samp.NP),
-                 var_YZA_s = var(samp.NP))
-```
-
 
 ```{r}
-# summary statistics for P sample (non-selected sample)
-n_P <- nrow(nhis) #sum(nhis$WTFA_A)
-means_P <- c(svymean(~ male, nhis.design, na.rm=TRUE)[1],
+# P sample
+# summary stats - using all available cases -- not just complete cases
+mean_P <- c(svymean(~ male, nhis.design, na.rm=TRUE)[1],
             svymean(~ educ_lths, nhis.design, na.rm=TRUE)[1],
             svymean(~ educ_hs, nhis.design, na.rm=TRUE)[1],
             svymean(~ educ_somecoll, nhis.design, na.rm=TRUE)[1],
@@ -230,41 +238,61 @@ means_P <- c(svymean(~ male, nhis.design, na.rm=TRUE)[1],
             svymean(~ region_s, nhis.design, na.rm=TRUE)[1],
             svymean(~ region_mw, nhis.design, na.rm=TRUE)[1], # REF = region_w
             svymean(~ gad2, nhis.design, na.rm=TRUE)[1]) # A variable
-var_P <- svyvar(~ male + educ_lths + educ_hs + educ_somecoll + educ_bach +
-                 race_hisp + race_nhwhite + race_nhblack + race_nhasian +
-                 age_18_25 + age_26_35 + age_36_45 + age_46_55 + age_56_65 + age_66_75 +
-                 region_ne + region_s + region_mw + 
-                 gad2, 
-               na.rm=TRUE, design=nhis.design)
-stats_P <- list(n_ns = n_P,
-                mean_ZA_ns = means_P,
-                var_ZA_ns = var_P)
-# Extract Z variables of interest from P sample, adding column of 1s for intercept
-# Some observations have missing covariate values, remove them
-CC <- nhis %>%
-  dplyr::select(WTFA_A,
+var_P <- as.matrix(svyvar(~ male + educ_lths + educ_hs + educ_somecoll + educ_bach +
+                            race_hisp + race_nhwhite + race_nhblack + race_nhasian +
+                            age_18_25 + age_26_35 + age_36_45 + age_46_55 + age_56_65 + age_66_75 +
+                            region_ne + region_s + region_mw + 
+                            gad2, 
+                          na.rm=TRUE, design=nhis.design))[1:length(mean_P), 1:length(mean_P)]
+# back out the selected estimates (from NP sample) to get nonselected estimates
+xbar <- mean_P
+s2 <- var_P
+xbar_s <- stats_NP$mean_YZA_s[-1]
+s2_s <- stats_NP$var_YZA_s[-1,-1]
+N <- sum(nhis$WTFA_A) # pop size
+n_s <- stats_NP$n_s   # selected sample (NP) size
+sfrac <- n_s/N
+n_ns <- N - n_s
+# back out the means
+xbar_ns <- (xbar - sfrac*xbar_s) / (1-sfrac)
+# back out the variance matrix
+s2_ns <- ((n_s + n_ns - 1) * s2 - (n_s - 1) * s2_s - n_s * xbar_s %*% t(xbar_s) - n_ns * xbar_ns %*% t(xbar_ns) + (n_s + n_ns) * xbar %*% t(xbar))/(n_ns-1)
+# backed out NS sample stats
+stats_NS <- list(n_ns = n_ns,
+                 mean_ZA_ns = xbar_ns,
+                 var_ZA_ns = s2_ns)
+
+# Z variables for P sample, adding column of 1s for intercept
+# Some observations have missing covariate (Z) values, remove them
+nhis_ccZ <- nhis %>%
+  filter(ccindZ) %>%
+  dplyr::select(WTFA_A, PPSU, PSTRAT,
                 male,
                 educ_lths, educ_hs, educ_somecoll, educ_bach,
                 race_hisp, race_nhwhite, race_nhblack, race_nhasian,
                 age_18_25, age_26_35, age_36_45, age_46_55, age_56_65, age_66_75,
-                region_ne, region_s, region_mw) %>%
-  drop_na()
+                region_ne, region_s, region_mw)
 # Z matrix for complete cases
-ZMAT_P <- CC %>%
-  dplyr::select(-WTFA_A) %>%
+ZMAT_P <- nhis_ccZ %>%
+  dplyr::select(-c(WTFA_A, PPSU, PSTRAT)) %>%
   add_column(intercept = 1) %>%
   relocate(intercept) %>%
   as.matrix()
-# weights for complete cases
-W <- CC$WTFA_A
 # number of CC
-n_P_CC <- length(W)
+n_P_CC <- nrow(nhis_ccZ)
+```
 
+NHIS sample size with complete Z variables (i.e., sample we impute to): `r nrow(nhis_ccZ)`
+
+```{r}
 ## Uniform(0,1) prior on phi
 set.seed(347834)
-draws <- mub_reg_bayes(stats_NP, stats_P, zparams = 18, ndraws = 1000)
+NIMPS <- 100
+draws <- mub_reg_bayes(stats_NP, stats_NS, zparams = 18, ndraws = NIMPS)
+```
 
-# Look at MUB(phi) posterior distributions
+```{r, include = FALSE}
+# Look at MUB(phi) posterior distributions - based on only 100 draws
 theme_set(theme_bw())
 mub <- as_tibble(draws$mubdraws) %>%
   pivot_longer(index.B0:index.B18, names_to = "parameter", values_to = "value") %>%
@@ -284,49 +312,156 @@ mub %>%
        x = "95% Credible Interval for MUB(phi)")
 ```
 
+Proxy strength
+
 ```{r}
-# Proxy strength
 median(draws$rhodraws)
-
-# predict Y in P sample (using draws of adjusted betas)
-ybarhats <- ZMAT_P %*% t(draws$betadraws)   # rows = observations, columns = draws
-residerrors <- apply(as.matrix(draws$residdraws), 1, function(x) rnorm(n_P_CC, mean = 0, sd = sqrt(x)))
-yhat <- ybarhats + residerrors
-# draws of estimated mean of Y in P sample (weighted means using NHIS weights)
-draws_ymean <- apply(yhat, 2, function(x) sum(x*W)/sum(W))
-# Plot versus phi
-plot(draws$phidraws, draws_ymean)
-# posterior median and 95% CrI for probability sample mean Y
-est_ppmmreg <- median(draws_ymean)
-# credible interval
-lb_ppmmreg <- as.numeric(quantile(draws_ymean, 0.025))
-ub_ppmmreg <- as.numeric(quantile(draws_ymean, 0.975))
-
-est_ppmmreg
-c(lb_ppmmreg, ub_ppmmreg)
 ```
 
-NHIS sample size with complete Z and A variables (i.e., sample we impute to): `r nrow(CC)`
+Bayesian weighted logistic regression for S|Z
+
+Using probability sample (with corresponding design weights) and non-probability sample with weights = 1
+
+```{r}
+# stack NP and P datasets
+stacked <- bind_rows(samp.NP, nhis_ccZ) %>%
+  # indicator for which sample (1 = NP, 0 = P)
+  mutate(S = case_when(is.na(WTFA_A) ~ 1, 
+                       .default = 0)) %>%
+  # assign weight = 1 for NP sample units
+  mutate(WTFA_A = case_when(S == 1 ~ 1, .default = WTFA_A))
+
+# Run Bayes weighted logistic regression using rstan
+bayesmodel_s <- stan_glm(
+  S ~ male + 
+    educ_lths + educ_hs + educ_somecoll + educ_bach + 
+    race_hisp + race_nhwhite + race_nhblack + race_nhasian +
+    age_18_25 + age_26_35 + age_36_45 + age_46_55 + age_56_65 + age_66_75 +
+    region_ne + region_s + region_mw,
+  data = stacked,
+  family = binomial(link = "logit"),
+  weights = WTFA_A,
+  seed = 99283,
+  chains = 1,
+  warmup = 1000,
+  iter = 1500, # 500 draws after warm-up, # will discard the first half of the chain
+  cores = parallel::detectCores()-1)
+# check summary
+# summary(bayesmodel_s)
+# check trace plots
+plot(bayesmodel_s, plotfun = "trace")
+
+# posterior draws of logistic regression coefficients
+draws_betas_s_model <- as.matrix(bayesmodel_s)
+# apply(draws_betas_s_model, 2, function(x) quantile(x, c(0.025, 0.5, 0.975)))
+# thin the chain for use in imputation to only 100 draws
+draws_betas_s_model <- draws_betas_s_model[seq(5,500,5),]
+```
+
+Transform into draws of the propensities
+
+```{r}
+# Get draws of propensities P(S=1|Z)
+xb <- ZMAT_P %*% t(draws_betas_s_model)  # rows = observations, columns = draws
+DRAWS_prob_s <- 1 - 1/(1 + exp(xb))
+# check max probability is <0.5 so can use the bias correction
+max(DRAWS_prob_s)
+# bias correction of https://pmc.ncbi.nlm.nih.gov/articles/PMC8526388/
+DRAWS_prob_s <- DRAWS_prob_s/(1-DRAWS_prob_s)
+```
+
+Draws of S|Z for probability sample
+
+```{r}
+# Draws of S|Z (for probability sample only)
+n_P <- nrow(ZMAT_P)
+set.seed(17374)
+S_vec <- rbinom(n = n_P * NIMPS, size = 1, prob = as.vector(DRAWS_prob_s))
+DRAWS_S <- matrix(S_vec, nrow = n_P, ncol = NIMPS)
+# check to see how often each unit's draw will come from S=1
+table(apply(DRAWS_S, 1, sum))
+# 28624 units are always draws from S=0, never from S=1 (0 of 100 imputations from S=1)
+# 682 units have 1 of 100 imputations from S=1
+# 13 units have 2 of 100 imputations from S=1
+```
+
+Draws from Y|Z based on mixture of and Y|Z,S=0 and Y|Z,S=1
+
+```{r}
+set.seed(33455)
+# Draws of Y|Z,S=1 in P sample
+DRAW_y_s1 <- ZMAT_P %*% t(draws$betadraws_s) + apply(as.matrix(draws$residdraws_s), 1, function(x) rnorm(n_P, mean = 0, sd = sqrt(x)))
+# Draws of Y|Z,S=0 in P sample
+DRAW_y_s0 <- ZMAT_P %*% t(draws$betadraws_ns) + apply(as.matrix(draws$residdraws_ns), 1, function(x) rnorm(n_P, mean = 0, sd = sqrt(x)))
+# Combine to get draws of Y|Z (mixture distribution)
+DRAW_y <- DRAW_y_s1*DRAWS_S + DRAW_y_s0*(1-DRAWS_S)
+
+# Use svymean to get design-based estimates of mean of y in each of the NDRAWS imputed datasets
+dat_imputed <- DRAW_y %>%
+  as.data.frame() %>%
+  bind_cols(nhis_ccZ)
+# each of the imputed Y variables will be called "V1", "V2", etc
+nhis_ccZ.design <- survey::svydesign(~PPSU, weights = ~WTFA_A, strata = ~PSTRAT, 
+                                     data = dat_imputed, 
+                                     nest = TRUE)
+# estimate weighted mean and variance
+svyest <- svymean(reformulate(names(dat_imputed)[1:NIMPS]), nhis_ccZ.design)
+theta <- coef(svyest)
+var_within <- diag(vcov(svyest))
+# combine with Rubin's Rules
+est <- mice::pool.scalar(Q = theta, U = var_within, n = n_P)
+est_ppmmreg <- est$qbar
+var_ppmmreg <- est$t
+se_ppmmreg <- sqrt(var_ppmmreg)
+tstar <- qt(0.975, est$df)
+lb_ppmmreg <- est_ppmmreg - tstar*se_ppmmreg
+ub_ppmmreg <- est_ppmmreg + tstar*se_ppmmreg
+est_ppmmreg
+c(lb_ppmmreg, ub_ppmmreg)
+# # Compare to posterior distribution of the point estimates
+# median(theta)
+# quantile(theta, c(0.025, 0.975))
+```
+
+```{r, include = FALSE}
+# Plot imputed estimates versus phi
+plot(draws$phidraws, theta)
+```
 
 ## Proposed Approach with $\phi$ = 1
 
 ```{r}
 ## phi = 1
 set.seed(347834)
-draws_phi1 <- mub_reg_bayes(stats_NP, stats_P, zparams = 18, ndraws = 1000, userphi = 1)
+draws_phi1 <- mub_reg_bayes(stats_NP, stats_NS, zparams = 18, ndraws = NIMPS, userphi = 1)
 
-# predict Y in P sample (using draws of adjusted betas)
-ybarhats_1 <- ZMAT_P %*% t(draws_phi1$betadraws)   # rows = observations, columns = draws
-residerrors_1 <- apply(as.matrix(draws_phi1$residdraws), 1, function(x) rnorm(n_P_CC, mean = 0, sd = sqrt(x)))
-yhat_1 <- ybarhats_1 + residerrors_1
-# draws of estimated mean of Y in P sample (weighted means using NHIS weights)
-draws_ymean_1 <- apply(yhat_1, 2, function(x) sum(x*W)/sum(W))
-# posterior median and 95% CrI for probability sample mean Y
-est_ppmmreg.phi1 <- median(draws_ymean_1)
-# credible interval
-lb_ppmmreg.phi1 <- as.numeric(quantile(draws_ymean_1, 0.025))
-ub_ppmmreg.phi1 <- as.numeric(quantile(draws_ymean_1, 0.975))
+# Draws of Y|Z,S=1 in P sample
+DRAW_y_s1 <- ZMAT_P %*% t(draws_phi1$betadraws_s) + apply(as.matrix(draws_phi1$residdraws_s), 1, function(x) rnorm(n_P, mean = 0, sd = sqrt(x)))
+# Draws of Y|Z,S=0 in P sample
+DRAW_y_s0 <- ZMAT_P %*% t(draws_phi1$betadraws_ns) + apply(as.matrix(draws_phi1$residdraws_ns), 1, function(x) rnorm(n_P, mean = 0, sd = sqrt(x)))
+# Combine to get draws of Y|Z (mixture distribution)
+DRAW_y <- DRAW_y_s1*DRAWS_S + DRAW_y_s0*(1-DRAWS_S)
 
+# Use svymean to get design-based estimates of mean of y in each of the NDRAWS imputed datasets
+dat_imputed <- DRAW_y %>%
+  as.data.frame() %>%
+  bind_cols(nhis_ccZ)
+# each of the imputed Y variables will be called "V1", "V2", etc
+nhis_ccZ.design <- survey::svydesign(~PPSU, weights = ~WTFA_A, strata = ~PSTRAT, 
+                                     data = dat_imputed, 
+                                     nest = TRUE)
+# estimate weighted mean and variance
+svyest <- svymean(reformulate(names(dat_imputed)[1:NIMPS]), nhis_ccZ.design)
+theta <- coef(svyest)
+var_within <- diag(vcov(svyest))
+# combine with Rubin's Rules
+est <- mice::pool.scalar(Q = theta, U = var_within, n = n_P)
+est_ppmmreg.phi1 <- est$qbar
+var_ppmmreg.phi1 <- est$t
+se_ppmmreg.phi1 <- sqrt(var_ppmmreg.phi1)
+tstar <- qt(0.975, est$df)
+lb_ppmmreg.phi1 <- est_ppmmreg.phi1 - tstar*se_ppmmreg.phi1
+ub_ppmmreg.phi1 <- est_ppmmreg.phi1 + tstar*se_ppmmreg.phi1
 est_ppmmreg.phi1
 c(lb_ppmmreg.phi1, ub_ppmmreg.phi1)
 ```
@@ -341,7 +476,7 @@ chen_mi <- nonprobsvy::nonprob(outcome = phq2 ~ male + educ_lths + educ_hs + edu
                                  region_ne + region_s + region_mw +
                                  gad2, 
                                data = samp.NP, 
-                               svydesign = subset(nhis.design, ccind==TRUE), 
+                               svydesign = subset(nhis.design, ccindZA==TRUE), 
                                method_outcome = "glm", 
                                family_outcome = "gaussian")
 est_mi <- as.numeric(chen_mi$output[1])
@@ -362,7 +497,7 @@ chen_ipw <- nonprobsvy::nonprob(selection = ~ male + educ_lths + educ_hs + educ_
                                  gad2, 
                                 target = ~ phq2, 
                                 data = samp.NP, 
-                                svydesign = subset(nhis.design, ccind==TRUE),
+                                svydesign = subset(nhis.design, ccindZA==TRUE),
                                 control_selection = control_sel(maxit = 1000, est_method = "gee"))
 est_ipw <- as.numeric(chen_ipw$output[1])
 lb_ipw <- as.numeric(chen_ipw$confidence_interval[1])
@@ -370,30 +505,6 @@ ub_ipw <- as.numeric(chen_ipw$confidence_interval[2])
 est_ipw
 c(lb_ipw, ub_ipw)
 ```
-
-```{r, include = FALSE}
-chen_ipw
-length(chen_ipw$ipw_weights)
-hist(chen_ipw$ipw_weights)
-hist(1/chen_ipw$ipw_weights)
-sum(chen_ipw$y[[1]]*chen_ipw$ipw_weights)/sum(chen_ipw$ipw_weights)
-```
-
-```{r, include = FALSE}
-test <- nonprobsvy::nonprob(selection = ~ male + educ_lths + educ_hs + educ_somecoll + educ_bach +
-                                 race_hisp + race_nhwhite + race_nhblack + race_nhasian +
-                                 age_18_25 + age_26_35 + age_36_45 + age_46_55 + age_56_65 + age_66_75 +
-                                 region_ne + region_s + region_mw +
-                                 gad2, 
-                                target = ~ phq2, 
-                                data = samp.NP, 
-                                svydesign = subset(nhis.design, ccind==TRUE),
-                                # control_selection = control_sel(maxit = 1000, penalty="MCP", nfolds=5),
-                                control_selection = control_sel(est_method = "gee"),
-                                control_inference = control_inf(var_method="bootstrap"))
-test
-```
-
 
 ## DR (assuming transportability/ignorable selection)
 
@@ -410,7 +521,7 @@ chen_dr <- nonprobsvy::nonprob(selection = ~ male + educ_lths + educ_hs + educ_s
                                  region_ne + region_s + region_mw +
                                  gad2, 
                                data = samp.NP, 
-                               svydesign = subset(nhis.design, ccind==TRUE), 
+                               svydesign = subset(nhis.design, ccindZA==TRUE), 
                                method_outcome = "glm", 
                                family_outcome = "gaussian",
                                control_selection = control_sel(maxit = 1000, est_method = "gee"))
@@ -421,97 +532,31 @@ est_dr
 c(lb_dr, ub_dr)
 ```
 
-<!-- ## Shadow variable approach -->
-
-<!-- ```{r} -->
-<!-- # stack -->
-<!-- samp.P <- nhis %>% -->
-<!--   dplyr::select(male, -->
-<!--                 educ_lths, educ_hs, educ_somecoll, educ_bach, -->
-<!--                 race_hisp, race_nhwhite, race_nhblack, race_nhasian, -->
-<!--                 age_18_25, age_26_35, age_36_45, age_46_55, age_56_65, age_66_75, -->
-<!--                 region_ne, region_s, region_mw, -->
-<!--                 gad2) %>% -->
-<!--   drop_na() -->
-<!-- both <- bind_rows(samp.P, samp.NP) -->
-<!-- both_Z <- both %>% -->
-<!--   dplyr::select(-c(phq2,gad2)) -->
-
-<!-- # Shadow variable approach ----- -->
-<!-- Y <- both$phq2 # outcome -->
-<!-- R <- !is.na(Y) # response indicator -->
-<!-- Z <- both$gad2  # shadow variable -->
-<!-- Xr <- Xz <- Xs <- X <- as.matrix(cbind(1,both_Z)) # covariates plus intercept -->
-<!-- data1 <- list(Y=Y, R=R, Z=Z, Xs=Xs, Xr=Xr, Xz=Xz) -->
-<!-- # some starting values -->
-<!-- ymean_NP <- mean(Y, na.rm = T) -->
-<!-- # baseline propensity model -->
-<!-- fitr <- glm(R ~ X - 1, family=binomial()) -->
-<!-- # baseline outcome estimation -->
-<!-- fity <- lm(Y[R==1] ~ Z[R==1] + X[R==1,] - 1) -->
-<!-- # ancillary outcome estimation -->
-<!-- fitz <- lm(Z[R==1] ~ X[R==1,] - 1) -->
-<!-- ### DR estimate -->
-<!-- # starting param values -->
-<!-- drstartpar <- c(ymean_NP,            # psi = outcome mean -->
-<!--                 1,                   # gamma = OR -->
-<!--                 coef(fitr),          # coef from propensity model -->
-<!--                 fity$coef,           # coef from Y|Z,X,R=1 -->
-<!--                 fitz$coef,           # coef from Z|X,R=1 -->
-<!--                 summary(fity)$sig^2, # resid variance from Y|Z,X,R=1 -->
-<!--                 summary(fitz)$sig^2, # resid variance from Z|X,R=1 -->
-<!--                 ymean_NP)            # psiNR = NP outcome mean -->
-<!-- # point estimates -->
-<!-- drpar <- optim(par = drstartpar, # starting values of parameter vector -->
-<!--                fn = GMM,         # function to be min/max'd -->
-<!--                f = DRmrf_edit, data=data1, # additional arguments for fn -->
-<!--                method = "BFGS", hessian = FALSE)$par -->
-<!--         # variance estimates -->
-<!--         drvar <- VarEst(DRmrf_edit, drpar, data1) -->
-<!--         # overall mean Y -->
-<!--         est_shadowdr <- as.numeric(drpar[1]) -->
-<!--         # SE of mean Y -->
-<!--         se_shadowdr <- sqrt(drvar[1,1]) -->
-<!--         # 95% CI -->
-<!--         z <- qnorm(.975) -->
-<!--         lb_shadowdr <- est_shadowdr - z*se_shadowdr -->
-<!--         ub_shadowdr <- est_shadowdr + z*se_shadowdr -->
-<!--         # back-calculate mean in probability sample (easy since SRS) -->
-<!--         est_shadowdrP <- ((n_NP+n_P)*est_shadowdr - n_NP*ymean_NP)/n_P -->
-<!--         # note that drpar[15] = ymean_NP -->
-<!--         # SE of mean Y in prob sample -->
-<!--         se_shadowdrP <- sqrt((n_NP+n_P)^2*drvar[1,1] + n_NP^2*drvar[15,15] - 2*(n_NP+n_P)*n_NP*drvar[1,15])/n_P -->
-<!--         # 95% CI -->
-<!--         lb_shadowdrP <- est_shadowdrP - z*se_shadowdrP -->
-<!--         ub_shadowdrP <- est_shadowdrP + z*se_shadowdrP -->
-<!--         # estimated OR(Y) -->
-<!--         or_shadowdr <- drpar[2] -->
-<!--         orse_shadowdr <- sqrt(drvar[2,2]) -->
-<!-- ``` -->
-
 ## Direct application of PPMM
 
 ```{r}
-stats_NP <- list(mean_YZ = colMeans(samp.NP),
-                 var_YZ = var(samp.NP),
-                 n_YZ = nrow(samp.NP))
-stats_P <- list(mean_Z = means_P,
-                var_Z = var_P,
-                n_Z = n_P)
+# NP sample summary stats - use same data just rename the list objects
+stats_NP2 <- list(mean_YZ = stats_NP$mean_YZA_s,
+                  var_YZ = stats_NP$var_YZA_s,
+                  n_YZ = stats_NP$n_s)
+# Non-selected sample summary stats - use same data just rename the list objects
+stats_NS2 <- list(mean_Z = stats_NS$mean_ZA_ns,
+                  var_Z = stats_NS$var_ZA_ns,
+                  n_Z = stats_NS$n_ns)
 
-# Apply fully Bayesian approach to NSFG data
+# Apply fully Bayesian approach
 set.seed(2282)
-ppmm_bayes <- ppmm::means_bayes(stats_NP,
-                                stats_P,
+ppmm_bayes <- ppmm::means_bayes(stats_NP2,
+                                stats_NS2,
                                 phi_character = "runif(1)",
                                 ndraws = 1000)
 # Plot versus phi
-plot(ppmm_bayes$phi, ppmm_bayes$muY_ns)
-# posterior median and 95% CrI for probability sample mean Y
-est_ppmm <- median(ppmm_bayes$muY_ns)
+plot(ppmm_bayes$phi, ppmm_bayes$muY)
+# posterior median and 95% CrI
+est_ppmm <- median(ppmm_bayes$muY)
 # credible interval
-lb_ppmm <- as.numeric(quantile(ppmm_bayes$muY_ns, 0.025))
-ub_ppmm <- as.numeric(quantile(ppmm_bayes$muY_ns, 0.975))
+lb_ppmm <- as.numeric(quantile(ppmm_bayes$muY, 0.025))
+ub_ppmm <- as.numeric(quantile(ppmm_bayes$muY, 0.975))
 
 est_ppmm
 c(lb_ppmm, ub_ppmm)
@@ -520,30 +565,32 @@ c(lb_ppmm, ub_ppmm)
 ## True mean based on NHIS 
 
 ```{r}
-nhiswt <- svymean(~phq2, design = nhis.design, na.rm = TRUE)[1]
-nhiswt
-confint(svymean(~phq2, design = nhis.design, na.rm = TRUE))
+nhiswt <- svymean(~phq2, design = nhis.design, na.rm = TRUE)
+est_nhiswt <- coef(nhiswt)
+ci <- confint(nhiswt)
+lb_nhiswt <- ci[1]
+ub_nhiswt <- ci[2]
+est_nhiswt
+c(lb_nhiswt, ub_nhiswt)
 ```
 
 ## Summary table
 
 ```{r}
-summary <- tibble(est_naive, lb_naive, ub_naive,
-                  est_hpswt, lb_hpswt, ub_hpswt,
-                  est_ppmmreg, lb_ppmmreg, ub_ppmmreg,
-                  est_ppmmreg.phi1, lb_ppmmreg.phi1, ub_ppmmreg.phi1,
-                  est_mi, lb_mi, ub_mi,
-                  est_ipw, lb_ipw, ub_ipw,
-                  est_dr, lb_dr, ub_dr,
-                  est_ppmm, lb_ppmm, ub_ppmm) %>%
-  pivot_longer(everything(), names_to = c(".value", "method"), names_sep="_" )
-
-summary <- bind_rows(tibble(method = "truth (NHIS wtd)", 
-                            est = as.numeric(nhiswt)), 
-                     summary) %>%
+allmethods <- tibble(est_nhiswt, lb_nhiswt, ub_nhiswt,
+                     est_naive, lb_naive, ub_naive,
+                     est_hpswt, lb_hpswt, ub_hpswt,
+                     est_ppmmreg, lb_ppmmreg, ub_ppmmreg,
+                     est_ppmmreg.phi1, lb_ppmmreg.phi1, ub_ppmmreg.phi1,
+                     est_mi, lb_mi, ub_mi,
+                     est_ipw, lb_ipw, ub_ipw,
+                     est_dr, lb_dr, ub_dr,
+                     est_ppmm, lb_ppmm, ub_ppmm) %>%
+  pivot_longer(everything(), names_to = c(".value", "method"), names_sep="_" ) %>%
   mutate(method_f = factor(method,
-                           levels = c("truth (NHIS wtd)", "naive", "hpswt", "mi", "ipw", "dr", "ppmm", "ppmmreg", "ppmmreg.phi1")))
-summary %>%
+                           levels = c("nhiswt", "naive", "hpswt", "mi", "ipw", "dr", 
+                                      "ppmm", "ppmmreg", "ppmmreg.phi1")))
+allmethods %>%
   arrange(method_f) %>%
   dplyr::select(-method_f) %>%
   kableExtra::kbl(digits = 3) %>%
@@ -551,15 +598,11 @@ summary %>%
 ```
 
 ```{r}
-summary %>%
-  filter(method != "truth (NHIS wtd)") %>%
+allmethods %>%
   ggplot(aes(x = est, y = fct_rev(method_f))) + 
   geom_point() +
   geom_errorbar(aes(xmin = lb, xmax = ub), width = 0.2) +
   coord_cartesian(xlim = c(0, 1.5)) + 
-  geom_vline(aes(xintercept = nhiswt), linetype = 2) + 
-  labs(xy = "Estimate and 95% Interval", y = " ")
+  geom_vline(aes(xintercept = est_nhiswt), linetype = 2) + 
+  labs(x = "Estimate and 95% Interval", y = " ")
 ```
-
-
-
