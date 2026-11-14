@@ -1,8 +1,8 @@
 ############################################
-#### Function to calculate MUB
+#### Function to calculate conditional correlation
 #### Author: Rebecca Andridge (andridge.1@osu.edu)
 #### Last modified:
-#### 06/18/2025 
+#### 02/07/2026 (original version)
 ############################################
 #### Inputs:
 #### stats_selected -- named list with 3 components:
@@ -14,18 +14,14 @@
 ####       (2) mean_ZA_ns -- vector of means for (in order) Z vars, A vars for non-selected sample
 ####       (3) var_ZA_ns -- covariance matrix for (in order) Z vars, A vars for non-selected sample
 #### nZvars -- number of Z variables
-#### intervals_at -- scalar or vector of phi values at which the (S)MUB is calculated, should be in [0,1] but values from [-Inf,1] are allowed
-####                 (defaults to (0,0.5,1))
 ############################################
 #### Returns:
-#### list:
-####    mub_point_est -- for each phi (column 1), the values of MUB for each Z variable (remaining columns)
-####    cor_XY.Z_s -- Cor(Y,X|Z,S=1)
-####    cor_XY_s -- Cor(Y,X|S=1)
-####    beta_YZ.Z_ns -- for each phi (column 1), regression coefficients for Y|Z,S=1
+####    cor_XY.Z_s -- proxy strength (scalar)
 ############################################
-mub_reg <- function(stats_selected, stats_not_selected, nZvars, intervals_at=c(0,0.5,1))
+
+mub_reg_cor <- function(stats_selected, stats_not_selected, nZvars)
 {
+  intervals_at <- 0
   
   # Pieces needed for calculations below
   n_s <- stats_selected$n_s
@@ -35,7 +31,7 @@ mub_reg <- function(stats_selected, stats_not_selected, nZvars, intervals_at=c(0
   # (Y,Z|S=1)
   mean_YZ_s <- stats_selected$mean_YZA_s[1:(1+nZvars)]
   var_YZ_s <- stats_selected$var_YZA_s[1:(1+nZvars),1:(1+nZvars)]
-  # (Y,A|S=1) 
+  # (Y,A|S=1)
   mean_YA_s <- stats_selected$mean_YZA_s[-c(2:(nZvars+1))]
   var_YA_s <- stats_selected$var_YZA_s[-c(2:(nZvars+1)),-c(2:(nZvars+1))]
   # (Z,A|S=1)
@@ -99,22 +95,15 @@ mub_reg <- function(stats_selected, stats_not_selected, nZvars, intervals_at=c(0
   cor_XY.Z_s <- drop(beta_YA.ZA_s %*% var_YA_s[1,-1] - var_XZ_s[1,-1] %*% solve(var_XZ_s[-1,-1]) %*% var_YZ_s[1,-1])/sqrt(var_X.Z_s*var_Y.Z_s)
   
   #### MUB
-  g <- (intervals_at+(1-intervals_at)*cor_XY.Z_s)/(intervals_at*cor_XY.Z_s+(1-intervals_at))
-  g[intervals_at==-Inf] <- -1  #replaces the NaN that results from the calculation involving -Inf
-  mub_point_est <- as.matrix(cbind(phi=intervals_at, outer(g, (beta_XZ.Z_s-beta_XZ.Z_ns)*sqrt(var_Y.Z_s/var_X.Z_s))))
-
-  ### Regression coefficients for non-selected cases, Y|Z,S=0 [adjusted via MUB index]
-  beta_YZ.Z_ns <- as.matrix(cbind(phi = intervals_at, 
-                                  matrix(rep(beta_YZ.Z_s, length(intervals_at)), byrow=TRUE, nrow=length(intervals_at)) - mub_point_est[,-1]))
-  # add column names
-  for (j in 0:nZvars)
-  {
-    colnames(mub_point_est)[2+j]  <- paste("index.B",j,sep="")
-    colnames(beta_YZ.Z_ns)[2+j]  <- paste("B",j,sep="")
-  }
+  # g <- (intervals_at+(1-intervals_at)*cor_XY.Z_s)/(intervals_at*cor_XY.Z_s+(1-intervals_at))
+  # g[intervals_at==-Inf] <- -1  #replaces the NaN that results from the calculation involving -Inf
+  # mub_point_est <- as.matrix(cbind(phi=intervals_at, outer(g, (beta_XZ.Z_s-beta_XZ.Z_ns)*sqrt(var_Y.Z_s/var_X.Z_s))))
+  # 
+  # # add column names
+  # for (j in 0:nZvars)
+  # {
+  #   colnames(mub_point_est)[2+j]  <- paste("index.B",j,sep="")
+  # }
   
-  return(list(mub_point_est = mub_point_est,
-              cor_XY.Z_s = cor_XY.Z_s,
-              cor_XY_s = cor_XY_s,
-              beta_YZ.Z_ns = beta_YZ.Z_ns))
+  return(cor_XY.Z_s)
 }
