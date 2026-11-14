@@ -1,0 +1,188 @@
+---
+title: "Simulation - Results with Interaction in NP Selection Model"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, out.width = "100%")
+library(tidyverse)
+library(kableExtra)
+theme_set(theme_bw())
+pd <- position_dodge(0.5)
+
+# Read in simulation parms (and pop truth) -----
+load("./simdata/simParms.RData")
+truth <- parms %>%
+  dplyr::select(pop, mu) %>%
+  distinct()
+load("./simdata/simParms_extra.RData")
+parms <- parms %>%
+  dplyr::select(pop, mech, sampsize,
+                rho_ya.z, or_y, or_a, or_ay, or_1y) %>%
+  left_join(truth)
+rm(truth)
+
+# Read in all estimators ----
+getres <- function(x)
+{
+  load(x)
+  return(res)
+}
+
+# PPMM-Reg (includes naive estimator)
+filelist <- fs::dir_ls("./simresults/", regexp = "ppmmreg_")
+stack_ppmmreg <- filelist %>% 
+  map(\(x) getres(x)) %>%
+  list_rbind() %>%
+  # filter to only new NP selection mechanisms
+  filter(mech >= 10) %>%
+  dplyr::select(-num_s_equals_1)
+
+# Merge estimators -----
+all <- stack_ppmmreg
+
+rm(stack_ppmmreg, filelist, getres)
+
+# Make long and merge in parms -----
+long <- all %>% 
+  dplyr::select(-c(starts_with("se"))) %>%
+  pivot_longer(-c(probtype, pop, mech, sampsize, rep), 
+               names_to = c(".value", "method"), 
+               names_sep="_" ) %>%
+  left_join(parms) %>%
+  mutate(bias = est - mu,
+         relbias = bias/mu,
+         cover = (lb < mu & ub > mu),
+         width = ub - lb) 
+
+# summarize across replicates
+sumstats <- long %>%
+  group_by(probtype, pop, mech, sampsize, mu, rho_ya.z, or_y, or_a, or_ay, or_1y, method) %>%
+  summarize(nreps = n(), 
+            mean_bias = mean(bias),
+            sd_bias = sd(bias),
+            lb_bias = mean_bias - 1.96*sd_bias/sqrt(nreps),
+            ub_bias = mean_bias + 1.96*sd_bias/sqrt(nreps),
+            mean_cover = mean(cover),
+            sd_cover = sqrt(mean_cover*(1-mean_cover)),
+            lb_cover = pmax(0, mean_cover - 1.96*sd_cover/sqrt(nreps)),
+            ub_cover = pmin(1, mean_cover + 1.96*sd_cover/sqrt(nreps)),
+            mean_width = mean(width),
+            median_width = median(width))
+sumstats <- sumstats %>%
+  ungroup() %>%
+    mutate(relbias = 100*mean_bias/mu,
+           method_f = factor(method, 
+                             levels = c("NP",
+                                        "ppmmreg0",
+                                        "ppmmreg1",
+                                        "ppmmreg"), 
+                           labels = c("Naive NP Est",
+                                      "PPMM-Reg(\u03c6=0)",
+                                      "PPMM-Reg(\u03c6=1)",
+                                      "PPMM-Reg")),
+         set = case_when(or_ay == 1.1 & or_1y == 1 ~ 1,
+                         or_ay == 1 & or_1y == 1.1 ~ 2),
+         set_f = case_when(set == 1 ~ "A*Y Interaction",
+                           set == 2 ~ "Z1*Y Interaction"))
+
+# labels for facets
+rho_ya.z.labs <- c("Cor(Y,A|Z) = 0.2", "Cor(Y,A|Z) = 0.5", "Cor(Y,A|Z) = 0.8")
+# names(rho_ya.z.labs) <- c("0.2", "0.5", "0.8")
+# or_ay.labs <- c("OR(A*Y) = 1", "OR(A*Y) = 1.1")
+# names(or_ay.labs) <- c(1, 1.1)
+# or_1y.labs <- c("OR(Z1*Y) = 1", "OR(Z1*Y) = 1.1")
+# names(or_1y.labs) <- c(1, 1.1)
+```
+
+## Bias
+
+```{r, fig.asp=0.4}
+g_bias <- sumstats %>%
+  ggplot(aes(y = fct_rev(method_f), x = mean_bias, color = factor(rho_ya.z), shape = factor(rho_ya.z))) + 
+  geom_point(size = 1, position = pd) + 
+  geom_errorbar(aes(xmin = lb_bias, xmax = ub_bias), position = pd, width = 0.3) + 
+  geom_vline(xintercept = 0, linetype = 2, color = "grey50") + 
+  labs(x = "Bias", y = " ", color = "Cor(Y,A|Z)", shape = "Cor(Y,A|Z)") + 
+  facet_grid(. ~ set_f, scales = "free") + 
+  theme(strip.background.y = element_blank(),
+        panel.spacing.y = unit(0,"cm")) 
+g_bias
+```
+
+## Coverage 
+
+```{r, fig.asp=0.4}
+g_cover <- sumstats %>%
+  ggplot(aes(y = fct_rev(method_f), x = mean_cover, color = factor(rho_ya.z), shape = factor(rho_ya.z))) + 
+  geom_point(size = 1, position = pd) + 
+  geom_errorbar(aes(xmin = lb_cover, xmax = ub_cover), position = pd, width = 0.3) + 
+  geom_vline(xintercept = 0.95, linetype = 2, color = "grey50") + 
+  labs(x = "Empirical Coverage of 95% Intervals", y = " ", color = "Cor(Y,A|Z)", shape = "Cor(Y,A|Z)") + 
+  facet_grid(. ~ set_f, scales = "free") + 
+  theme(strip.background.y = element_blank(),
+        panel.spacing.y = unit(0,"cm")) + 
+  scale_x_continuous(breaks = c(0, .25, .5, .75, 1), labels = c("0", ".25", ".5", ".75", "1"))
+g_cover
+```
+
+## CI Width
+
+```{r, fig.asp=0.4}
+g_width <- sumstats %>%
+  ggplot(aes(y = fct_rev(method_f), x = median_width, color = factor(rho_ya.z), shape = factor(rho_ya.z))) + 
+  geom_point(size = 1, position = pd) + 
+  geom_errorbar(aes(xmin = 0, xmax = median_width), position = pd, width = 0, orientation = "y") + 
+  geom_vline(xintercept = 0, linetype = 1, color = "grey50") + 
+  labs(x = "Median CI Width", y = " ", color = "Cor(Y,A|Z)", shape = "Cor(Y,A|Z)") + 
+  theme(legend.position = "right") +
+  facet_grid(. ~ set_f, scales = "free") + 
+  theme(strip.background.y = element_blank(),
+        panel.spacing.y = unit(0,"cm"))
+g_width
+```
+
+```{r, include = FALSE}
+ggpubr::ggarrange(g_bias, g_cover, g_width, common.legend = TRUE, legend = "top", labels = "AUTO", ncol = 1)
+ggsave("./plots/interaction_all.png", width=7, height=8)
+```
+
+
+## Estimates
+
+Showing the PPMM-Reg estimates from $\phi$=0 to 1, with 0.5 marked in the middle
+
+```{r, fig.asp=0.4}
+sumstats1 <- long %>%
+  group_by(probtype, pop, mech, sampsize, mu, rho_ya.z, or_y, or_a, or_ay, or_1y, method) %>%
+  summarize(nreps = n(), 
+            mean_est = mean(est),
+            sd_est = sd(est),
+            lb_est = mean_est - 1.96*sd(est)/sqrt(nreps),
+            ub_est = mean_est + 1.96*sd(est)/sqrt(nreps)) %>%
+  mutate(set = case_when(or_ay == 1.1 & or_1y == 1 ~ 1,
+                         or_ay == 1 & or_1y == 1.1 ~ 2),
+         set_f = case_when(set == 1 ~ "A*Y Interaction",
+                           set == 2 ~ "Z1*Y Interaction"))
+one <- sumstats1 %>%
+  filter(method != "NP") %>%
+  dplyr::select(-c(sd_est:ub_est)) %>%
+  pivot_wider(values_from = mean_est, names_from = method) %>%
+  rename(est = ppmmreg, lb = ppmmreg1, ub = ppmmreg0) %>%
+  add_column(method = "PPMM-Reg")
+two <- sumstats1 %>%
+  filter(method == "NP") %>%
+  rename(est = mean_est, lb = lb_est, ub = ub_est)
+bind_rows(one, two) %>%
+  ggplot(aes(x = est, y = method, color = factor(rho_ya.z), shape = factor(rho_ya.z))) + 
+  geom_point(position = pd) + 
+  geom_errorbar(aes(xmin = lb, xmax = ub), position = pd, width = 0.3) + 
+  geom_vline(aes(xintercept = mu), col = "grey50", lty = 2) + 
+  facet_grid(. ~ set_f) +
+  labs(x = "Estimate", y = " ")
+```
+

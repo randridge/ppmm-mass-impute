@@ -1,0 +1,399 @@
+---
+title: "Simulation - Results"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, out.width = "100%", fig.asp=0.8)
+library(tidyverse)
+library(kableExtra)
+theme_set(theme_bw())
+pd <- position_dodge(0.5)
+
+# Read in simulation parms (and pop truth) -----
+load("./simdata/simParms.RData")
+parms <- parms %>%
+  dplyr::select(pop, mech, sampsize,
+                rho_ya.z, or_y, or_a,
+                mu)
+
+# Read in all estimators ----
+getres <- function(x)
+{
+  load(x)
+  return(res)
+}
+
+# Gold standard estimator
+filelist <- fs::dir_ls("./simresults/", regexp = "gold")
+stack_gold <- filelist %>% 
+  map(\(x) getres(x)) %>%
+  list_rbind() %>%
+  dplyr::select(probtype, pop, rep, est_P:ub_P)
+
+# Naive NP estimator
+filelist <- fs::dir_ls("./simresults/", regexp = "naive")
+stack_naive <- filelist %>% 
+  map(\(x) getres(x)) %>%
+  list_rbind() %>%
+  dplyr::select(pop, mech, sampsize, rep, est_NP:ub_NP)
+
+# Combine Naive and Gold
+stack_naive1 <- stack_naive %>%
+  add_column(probtype = "SRS")
+stack_naive2 <- stack_naive %>%
+  add_column(probtype = "STR")
+stack_naive_gold <- bind_rows(stack_naive1, stack_naive2) %>%
+  full_join(stack_gold)
+rm(stack_naive, stack_naive1, stack_naive2, stack_gold)
+
+# PPMM direct application
+filelist <- fs::dir_ls("./simresults/", regexp = "ppmmdirect")
+stack_ppmmdirect <- filelist %>% 
+  map(\(x) getres(x)) %>%
+  list_rbind()
+
+# PPMM-Reg
+filelist <- fs::dir_ls("./simresults/", regexp = "ppmmreg_")
+stack_ppmmreg <- filelist %>% 
+  map(\(x) getres(x)) %>%
+  list_rbind() %>%
+  # filter to only original 9 NP selection mechanisms
+  filter(mech <= 9) %>%
+  dplyr::select(-c(est_NP:ub_NP, num_s_equals_1))
+
+# Chen methods (IPW / MI / DR)
+filelist <- fs::dir_ls("./simresults/", regexp = "chen")
+stack_chen <- filelist %>% 
+  map(\(x) getres(x)) %>%
+  list_rbind()
+
+# Shadow variable methods
+filelist <- fs::dir_ls("./simresults/", regexp = "shadow")
+stack_shadow <- filelist %>% 
+  map(\(x) getres(x)) %>%
+  list_rbind()
+
+# Merge estimators -----
+all <- stack_naive_gold %>%
+  left_join(stack_chen) %>%
+  left_join(stack_ppmmdirect) %>%
+  left_join(stack_ppmmreg) %>%
+  left_join(stack_shadow)
+  
+rm(stack_chen, stack_naive_gold, stack_ppmmdirect, stack_ppmmreg, stack_shadow, filelist, getres)
+
+# Make long and merge in parms -----
+long <- all %>% 
+  dplyr::select(-c(starts_with("se"), or_shadowdr, orse_shadowdr)) %>%
+  pivot_longer(-c(probtype, pop, mech, sampsize, rep), 
+               names_to = c(".value", "method"), 
+               names_sep="_" ) %>%
+  left_join(parms) %>%
+  mutate(bias = est - mu,
+         relbias = bias/mu,
+         cover = (lb < mu & ub > mu),
+         width = ub - lb)
+
+# summarize across replicates
+part1 <- long %>%
+  group_by(probtype, pop, mech, sampsize, mu, rho_ya.z, or_y, or_a, method) %>%
+  summarize(nreps = sum(!is.na(est)))
+part2 <- long %>%
+  drop_na() %>%
+  group_by(probtype, pop, mech, sampsize, mu, rho_ya.z, or_y, or_a, method) %>%
+  summarize(nreps = n(), 
+            mean_est = mean(est),
+            mean_bias = mean(bias),
+            sd_bias = sd(bias),
+            lb_bias = mean_bias - 1.96*sd_bias/sqrt(nreps),
+            ub_bias = mean_bias + 1.96*sd_bias/sqrt(nreps),
+            mean_cover = mean(cover),
+            sd_cover = sqrt(mean_cover*(1-mean_cover)),
+            lb_cover = pmax(0, mean_cover - 1.96*sd_cover/sqrt(nreps)),
+            ub_cover = pmin(1, mean_cover + 1.96*sd_cover/sqrt(nreps)),
+            mean_width = mean(width),
+            median_width = median(width))
+sumstats <- left_join(part1, part2) %>%
+  ungroup() %>%
+  mutate(relbias = 100*mean_bias/mu,
+         method_f = factor(method, 
+                           levels = c("ppmmreg", "ppmmreg0", "ppmmreg1", 
+                                      "chenmi","chenipw","chendr",
+                                      "ppmm","ppmm0","ppmm1",
+                                      "shadowdrP",
+                                      "NP", "P"), 
+                           labels = c("PPMM-Reg", "PPMM-Reg(\u03c6=0)", "PPMM-Reg(\u03c6=1)",
+                                      "MI", "IPW", "DR",
+                                      "SMUB", "SMUB(\u03c6=0)", "SMUB(\u03c6=1)",
+                                      "Shadow Var",
+                                      "Naive NP Est", "Prob Samp Est")),
+         set = case_when(or_y == 1 & or_a == 1 ~ 1,
+                         or_y == 1 & or_a != 1 ~ 2,
+                         or_y != 1 & or_a == 1 ~ 3,
+                         or_y != 1 & or_a != 1 ~ 4),
+         set_f = case_when(set == 1 ~ "Set 1: Ignorable w/Shadow Var",
+                           set == 2 ~ "Set 2: Ignorable w/o Shadow Var",
+                           set == 3 ~ "Set 3: Nonignorable w/Shadow Var",
+                           set == 4 ~ "Set 4: Nonignorable w/o Shadow Var"),
+         estimator_group = case_when(method %in% c("P", "NP") ~ " ",
+                                     method %in% c("ppmmreg","ppmmreg0","ppmmreg1") ~ "PPMM-Reg",
+                                     method %in% c("chenmi","chenipw","chendr","ppmm0") ~ "Ignorable",
+                                     method %in% c("shadowdrP", "ppmm","ppmm1") ~ "Other")) %>%
+  mutate(estimator_group = fct_relevel(estimator_group, c(" ", "PPMM-Reg", "Ignorable", "Other"))) %>%
+  mutate(sampsize_f = factor(sampsize, levels = 1:2, labels = c("NP smaller than P", "NP larger than P")))
+
+# labels for facets
+rho_ya.z.labs <- c("Cor(Y,A|Z) = 0.2", "Cor(Y,A|Z) = 0.5", "Cor(Y,A|Z) = 0.8")
+names(rho_ya.z.labs) <- c("0.2", "0.5", "0.8")
+or_a.labs <- c("OR(A) = 1", "OR(A) = 1.1", "OR(A) = 2")
+names(or_a.labs) <- c(1, 1.1, 2)
+or_y.labs <- c("OR(Y) = 1", "OR(Y) = 1.1", "OR(Y) = 2")
+names(or_y.labs) <- c(1, 1.1, 2)
+
+rm(part1, part2, long, all)
+
+# remove the shadow variable + STR rows that are NA so doesn't plot
+sumstats <- sumstats %>%
+  drop_na()
+
+# just the competing ignorable approaches (MI, DR, IPW, SMUB(0)) to put separate in supplemental
+sumstats_ign <- sumstats %>%
+  filter(method %in% c("chendr", "chenipw", "chenmi", "ppmm0", "ppmmreg0"))
+
+# main comparisons (excludes all but one Chen method, excludes PPMM(0) and PPMM(1))
+sumstats_main <- sumstats %>%
+  filter(method %in% c("P", "NP", 
+                       "ppmmreg", "ppmmreg0", "ppmmreg1",
+                       "chenmi", # just one of the Chen methods
+                       "shadowdrP", "ppmm")) %>%
+  mutate(hline1 = 2.5,
+         hline2 = case_when(probtype == "SRS" ~ 5.5,
+                            probtype == "STR" ~ 4.5))
+```
+
+Methods that do not have 1000 replicates (b/c of convergence problems):
+
+```{r}
+# methods that do not have 1000 reps
+sumstats %>%
+  filter(nreps >0 & nreps < 1000) %>%
+  dplyr::select(method_f, probtype, sampsize, set_f, rho_ya.z, or_y, or_a, nreps) %>%
+  kbl() %>%
+  kable_classic()
+```
+
+Notes:
+
+* When OR(Y) = 1 --> Selection is **ignorable**  
+  * phi=0 for PPMM-Reg and SMUB
+  * Chen methods should work  
+* When OR(Y) > 1 --> Selection is **nonignorable**   
+  * phi>0 for PPMM-Reg and SMUB
+* When OR(A) = 1 --> A **is** a shadow variable  
+  * phi=1 for PPMM-Reg, 0<phi<1 for SMUB  
+* When OR(A) > 1 --> A **is not** a shadow variable   
+  * phi>0 for PPMM-Reg, 0<phi<1 for SMUB
+
+```{r}
+# plot bias
+g_bias <- sumstats %>%
+  ggplot(aes(y = fct_rev(method_f), x = mean_bias, color = factor(rho_ya.z), shape = factor(rho_ya.z))) + 
+  geom_point(size = 1, position = pd) + 
+  geom_errorbar(aes(xmin = lb_bias, xmax = ub_bias), position = pd, width = 0.3) + 
+  geom_vline(xintercept = 0, linetype = 2, color = "grey50") + 
+  labs(x = "Empirical Bias", y = " ", color = "Cor(Y,A|Z)", shape = "Cor(Y,A|Z)") + 
+  ggh4x::facet_nested(sampsize_f + probtype ~ or_y + or_a, 
+                      labeller = labeller(or_y = or_y.labs, or_a = or_a.labs),
+                      scales = "free", space = "free_y")  + 
+  theme(legend.position = "bottom")
+# plot coverage
+g_cover <- sumstats %>%
+  ggplot(aes(y = fct_rev(method_f), x = mean_cover, color = factor(rho_ya.z), shape = factor(rho_ya.z))) + 
+  geom_point(size = 1, position = pd) + 
+  geom_errorbar(aes(xmin = lb_cover, xmax = ub_cover), position = pd, width = 0.3) + 
+  geom_vline(xintercept = 0.95, linetype = 2, color = "grey50") + 
+  labs(x = "Empirical Coverage of 95% Intervals", y = " ", color = "Cor(Y,A|Z)", shape = "Cor(Y,A|Z)") + 
+  ggh4x::facet_nested(sampsize_f + probtype ~ or_y + or_a, 
+                      labeller = labeller(or_y = or_y.labs, or_a = or_a.labs),
+                      scales = "free", space = "free_y")  + 
+  theme(legend.position = "bottom") +
+  coord_cartesian(xlim = c(0,1))
+# plot ci width
+g_width <- sumstats %>%
+  ggplot(aes(y = fct_rev(method_f), x = median_width, color = factor(rho_ya.z), shape = factor(rho_ya.z))) + 
+  geom_point(size = 1, position = pd) + 
+  geom_errorbar(aes(xmin = 0, xmax = median_width), position = pd, width = 0, orientation = "y") + 
+  geom_vline(xintercept = 0, linetype = 1, color = "grey50") + 
+  labs(x = "Median CI Width", y = " ", color = "Cor(Y,A|Z)", shape = "Cor(Y,A|Z)") + 
+  ggh4x::facet_nested(sampsize_f + probtype ~ or_y + or_a, 
+                      labeller = labeller(or_y = or_y.labs, or_a = or_a.labs),
+                      scales = "free", space = "free_y")  + 
+  theme(legend.position = "bottom")
+```
+
+# Main Results
+
+## Ignorable (Sets 1 & 2) {.tabset}
+
+
+### Bias
+```{r}
+g_bias + filter(sumstats_main, or_y == 1) + 
+  geom_hline(aes(yintercept = hline1), col = "grey50") + geom_hline(aes(yintercept = hline2), col = "grey50")
+ggsave("./plots/set1_2_bias.png", width = 8, height = 6)
+```
+
+### Coverage
+```{r}
+g_cover + filter(sumstats_main, or_y == 1) + 
+  geom_hline(aes(yintercept = hline1), col = "grey50") + geom_hline(aes(yintercept = hline2), col = "grey50")
+ggsave("./plots/set1_2_cover.png", width = 8, height = 6)
+```
+
+### CI Width
+```{r}
+g_width + filter(sumstats_main, or_y == 1) + 
+  geom_hline(aes(yintercept = hline1), col = "grey50") + geom_hline(aes(yintercept = hline2), col = "grey50")
+ggsave("./plots/set1_2_width.png", width = 8, height = 6)
+```
+
+
+## Non-Ignorable w/Shadow Variable (Set 3) {.tabset}
+
+### Bias
+```{r}
+g_bias + filter(sumstats_main, or_y > 1 & or_a == 1) + 
+  geom_hline(aes(yintercept = hline1), col = "grey50") + geom_hline(aes(yintercept = hline2), col = "grey50") +
+  # override the facetting to put OR(A) on top
+  ggh4x::facet_nested(sampsize_f + probtype ~ or_a + or_y, 
+                      labeller = labeller(or_y = or_y.labs, or_a = or_a.labs),
+                      scales = "free", space = "free_y")
+ggsave("./plots/set3_bias.png", width = 6, height = 6)
+```
+
+### Coverage
+```{r}
+g_cover + filter(sumstats_main, or_y > 1 & or_a == 1) + 
+  geom_hline(aes(yintercept = hline1), col = "grey50") + geom_hline(aes(yintercept = hline2), col = "grey50") +
+  # override the facetting to put OR(A) on top
+  ggh4x::facet_nested(sampsize_f + probtype ~ or_a + or_y, 
+                      labeller = labeller(or_y = or_y.labs, or_a = or_a.labs),
+                      scales = "free", space = "free_y")
+ggsave("./plots/set3_cover.png", width = 6, height = 6)
+```
+
+### CI Width
+```{r}
+g_width + filter(sumstats_main, or_y > 1 & or_a == 1) + 
+  geom_hline(aes(yintercept = hline1), col = "grey50") + geom_hline(aes(yintercept = hline2), col = "grey50") +
+  # override the facetting to put OR(A) on top
+  ggh4x::facet_nested(sampsize_f + probtype ~ or_a + or_y, 
+                      labeller = labeller(or_y = or_y.labs, or_a = or_a.labs),
+                      scales = "free", space = "free_y")
+ggsave("./plots/set3_width.png", width = 6, height = 6)
+```
+
+## Non-Ignorable, no Shadow Variable (Set 4) {.tabset}
+
+### Bias
+```{r}
+g_bias + filter(sumstats_main, or_y > 1 & or_a > 1) + 
+  geom_hline(aes(yintercept = hline1), col = "grey50") + geom_hline(aes(yintercept = hline2), col = "grey50")
+ggsave("./plots/set4_bias.png", width = 10, height = 6)
+```
+
+### Coverage
+```{r}
+g_cover + filter(sumstats_main, or_y > 1 & or_a > 1) + 
+  geom_hline(aes(yintercept = hline1), col = "grey50") + geom_hline(aes(yintercept = hline2), col = "grey50")
+ggsave("./plots/set4_cover.png", width = 10, height = 6)
+```
+
+### CI Width
+```{r}
+g_width + filter(sumstats_main, or_y > 1 & or_a > 1) + 
+  geom_hline(aes(yintercept = hline1), col = "grey50") + geom_hline(aes(yintercept = hline2), col = "grey50") + 
+  ggh4x::facetted_pos_scales(x = list(or_y == 2 & or_a == 2 ~ scale_x_continuous(limits = c(NA, 56))))
+ggsave("./plots/set4_width.png", width = 10, height = 6)
+```
+
+# Results for Methods that Assume Ignorability
+
+## Ignorable (Sets 1 & 2) {.tabset}
+
+### Bias
+```{r}
+g_bias + filter(sumstats_ign, or_y == 1)
+ggsave("./plots/ign_set1_2_bias.png", width = 8, height = 6)
+```
+
+### Coverage
+```{r}
+g_cover + filter(sumstats_ign, or_y == 1)
+ggsave("./plots/ign_set1_2_cover.png", width = 8, height = 6)
+```
+
+### CI Width
+```{r}
+g_width + filter(sumstats_ign, or_y == 1)
+ggsave("./plots/ign_set1_2_width.png", width = 8, height = 6)
+```
+
+
+## Non-Ignorable w/Shadow Variable (Set 3) {.tabset}
+
+### Bias
+```{r}
+g_bias + filter(sumstats_ign, or_y > 1 & or_a == 1) + 
+  # override the facetting to put OR(A) on top
+  ggh4x::facet_nested(sampsize_f + probtype ~ or_a + or_y, 
+                      labeller = labeller(or_y = or_y.labs, or_a = or_a.labs),
+                      scales = "free", space = "free_y")
+ggsave("./plots/ign_set3_bias.png", width = 6, height = 6)
+```
+
+### Coverage
+```{r}
+g_cover + filter(sumstats_ign, or_y > 1 & or_a == 1) + 
+  # override the facetting to put OR(A) on top
+  ggh4x::facet_nested(sampsize_f + probtype ~ or_a + or_y, 
+                      labeller = labeller(or_y = or_y.labs, or_a = or_a.labs),
+                      scales = "free", space = "free_y")
+ggsave("./plots/ign_set3_cover.png", width = 6, height = 6)
+```
+
+### CI Width
+```{r}
+g_width + filter(sumstats_ign, or_y > 1 & or_a == 1) + 
+  # override the facetting to put OR(A) on top
+  ggh4x::facet_nested(sampsize_f + probtype ~ or_a + or_y, 
+                      labeller = labeller(or_y = or_y.labs, or_a = or_a.labs),
+                      scales = "free", space = "free_y")
+ggsave("./plots/ign_set3_width.png", width = 6, height = 6)
+```
+
+## Non-Ignorable, no Shadow Variable (Set 4) {.tabset}
+
+### Bias
+```{r}
+g_bias + filter(sumstats_ign, or_y > 1 & or_a > 1) 
+ggsave("./plots/ign_set4_bias.png", width = 10, height = 6)
+```
+
+### Coverage
+```{r}
+g_cover + filter(sumstats_ign, or_y > 1 & or_a > 1) 
+ggsave("./plots/ign_set4_cover.png", width = 10, height = 6)
+```
+
+### CI Width
+```{r}
+g_width + filter(sumstats_ign, or_y > 1 & or_a > 1)
+ggsave("./plots/ign_set4_width.png", width = 10, height = 6)
+```
+

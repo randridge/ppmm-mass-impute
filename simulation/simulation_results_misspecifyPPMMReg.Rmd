@@ -1,0 +1,320 @@
+---
+title: "Simulation - Results with Alternative PPMM-Reg Models"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+date: "`r Sys.Date()`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, out.width = "100%")
+library(tidyverse)
+library(kableExtra)
+theme_set(theme_bw())
+pd <- position_dodge(0.5)
+
+# Read in simulation parms (and pop truth) -----
+load("./simdata/simParms.RData")
+parms <- parms %>%
+  dplyr::select(pop, mech, sampsize,
+                rho_ya.z, or_y, or_a,
+                mu)
+
+# Read in all estimators ----
+getres <- function(x)
+{
+  load(x)
+  return(res)
+}
+
+# PPMM-Reg
+filelist <- fs::dir_ls("./simresults/", regexp = "ppmmreg_")
+stack_ppmmreg <- filelist %>% 
+  map(\(x) getres(x)) %>%
+  list_rbind() %>%
+  # filter to only SRS
+  filter(probtype == "SRS") %>%
+  # filter to only P > NP
+  filter(sampsize == 1) %>%
+  # filter to only original 9 NP selection mechanisms
+  filter(mech <= 9) %>%
+  dplyr::select(-c(est_NP:ub_NP, num_s_equals_1))
+
+# PPMM-Reg using alternative covariates - set A
+filelist <- fs::dir_ls("./simresults/", regexp = "ppmmregmisA")
+stack_ppmmregmisA <- filelist %>% 
+  map(\(x) getres(x)) %>%
+  list_rbind() %>%
+  dplyr::select(-num_s_equals_1)
+
+# PPMM-Reg using alternative covariates - set B
+filelist <- fs::dir_ls("./simresults/", regexp = "ppmmregmisB")
+stack_ppmmregmisB <- filelist %>% 
+  map(\(x) getres(x)) %>%
+  list_rbind() %>%
+  dplyr::select(-num_s_equals_1)
+
+# Merge estimators -----
+all <- stack_ppmmreg %>%
+  left_join(stack_ppmmregmisA) %>%
+  left_join(stack_ppmmregmisB)
+
+rm(stack_ppmmreg, stack_ppmmregmisA, stack_ppmmregmisB, filelist, getres)
+
+# Make long and merge in parms -----
+long <- all %>% 
+  dplyr::select(-c(starts_with("se"))) %>%
+  pivot_longer(-c(probtype, pop, mech, sampsize, rep), 
+               names_to = c(".value", "method"), 
+               names_sep="_" ) %>%
+  left_join(parms) %>%
+  mutate(bias = est - mu,
+         relbias = bias/mu,
+         cover = (lb < mu & ub > mu),
+         width = ub - lb) 
+
+# summarize across replicates
+sumstats <- long %>%
+  group_by(probtype, pop, mech, sampsize, mu, rho_ya.z, or_y, or_a, method) %>%
+  summarize(nreps = n(), 
+            mean_bias = mean(bias),
+            sd_bias = sd(bias),
+            lb_bias = mean_bias - 1.96*sd_bias/sqrt(nreps),
+            ub_bias = mean_bias + 1.96*sd_bias/sqrt(nreps),
+            mean_cover = mean(cover),
+            sd_cover = sqrt(mean_cover*(1-mean_cover)),
+            lb_cover = pmax(0, mean_cover - 1.96*sd_cover/sqrt(nreps)),
+            ub_cover = pmin(1, mean_cover + 1.96*sd_cover/sqrt(nreps)),
+            mean_width = mean(width),
+            median_width = median(width))
+sumstats <- sumstats %>%
+  ungroup() %>%
+  mutate(relbias = 100*mean_bias/mu,
+         phi_value = case_when(method %in% c("ppmmreg0","ppmmregmisA0","ppmmregmisB0") ~ "\u03c6=0",
+                               method %in% c("ppmmreg1","ppmmregmisA1","ppmmregmisB1") ~ "\u03c6=1",
+                               method %in% c("ppmmreg", "ppmmregmisA", "ppmmregmisB") ~ "\u03c6~Uniform(0,1)"),
+         covariates = case_when(method %in% c("ppmmreg0", 
+                                              "ppmmreg1", 
+                                              "ppmmreg") ~ "Proxy = A, Covars = Z1 + Z2",
+                                method %in% c("ppmmregmisA0", 
+                                              "ppmmregmisA1", 
+                                              "ppmmregmisA") ~ "Proxy = Z2, Covars = Z1 + A",
+                                method %in% c("ppmmregmisB0",
+                                              "ppmmregmisB1",
+                                              "ppmmregmisB") ~ "Proxy = Z2, Covars = Z1"),
+         covariates = factor(covariates, levels = c("Proxy = A, Covars = Z1 + Z2",
+                                                    "Proxy = Z2, Covars = Z1 + A",
+                                                    "Proxy = Z2, Covars = Z1")),
+         set = case_when(or_y == 1 & or_a == 1 ~ 1,
+                         or_y == 1 & or_a != 1 ~ 2,
+                         or_y != 1 & or_a == 1 ~ 3,
+                         or_y != 1 & or_a != 1 ~ 4),
+         set_f = case_when(set == 1 ~ "Set 1: Ignorable w/Shadow Var",
+                           set == 2 ~ "Set 2: Ignorable w/o Shadow Var",
+                           set == 3 ~ "Set 3: Nonignorable w/Shadow Var",
+                           set == 4 ~ "Set 4: Nonignorable w/o Shadow Var"))
+
+
+# labels for facets
+rho_ya.z.labs <- c("Cor(Y,A|Z) = 0.2", "Cor(Y,A|Z) = 0.5", "Cor(Y,A|Z) = 0.8")
+names(rho_ya.z.labs) <- c("0.2", "0.5", "0.8")
+or_a.labs <- c("OR(A) = 1", "OR(A) = 1.1", "OR(A) = 2")
+names(or_a.labs) <- c(1, 1.1, 2)
+or_y.labs <- c("OR(Y) = 1", "OR(Y) = 1.1", "OR(Y) = 2")
+names(or_y.labs) <- c(1, 1.1, 2)
+
+# Also get the proxy strength estimates
+load("./simresults/rhohat_ppmmreg.RData")
+rhohat_long <- rhohat %>%
+  filter(sampsize == 2) %>%
+  left_join(parms) %>%
+  mutate(set = case_when(or_y == 1 & or_a == 1 ~ 1,
+                         or_y == 1 & or_a != 1 ~ 2,
+                         or_y != 1 & or_a == 1 ~ 3,
+                         or_y != 1 & or_a != 1 ~ 4),
+         set_f = case_when(set == 1 ~ "Set 1: Ignorable w/Shadow Var",
+                           set == 2 ~ "Set 2: Ignorable w/o Shadow Var",
+                           set == 3 ~ "Set 3: Nonignorable w/Shadow Var",
+                           set == 4 ~ "Set 4: Nonignorable w/o Shadow Var")) %>%
+  pivot_longer(contains("rhohat"), names_to = "model", values_to = "rhohat", names_prefix = "rhohat_") %>%
+  mutate(model = factor(model, levels = c("orig", "misA", "misB"),
+                        labels = c("Proxy = A, Covars = Z1 + Z2",
+                                   "Proxy = Z2, Covars = Z1 + A",
+                                   "Proxy = Z2, Covars = Z1")))
+```
+
+### Proxy strength for the different PPMM-Reg specifications
+
+```{r, fig.asp=0.3}
+g <- rhohat_long %>%
+  ggplot(aes(y = factor(pop), x = rhohat, color = model, shape = model)) + 
+  geom_point() +
+  facet_grid(.~or_y+or_a, space = "free", labeller = labeller(or_y = or_y.labs, or_a = or_a.labs)) +
+  labs(y = "Population", x = "Proxy Strength", color = "", shape = "") + 
+  theme(plot.title = element_text(size = 10)) + 
+  coord_cartesian(xlim = c(0.1, 0.9)) + 
+  scale_x_continuous(breaks = c(0.2, 0.5, 0.8)) + 
+  scale_color_brewer(palette = "Set2")
+g_rho1 <- g + filter(rhohat_long, set == 1) + ggtitle("Ignorable, A is a Shadow Variable")
+g_rho2 <- g + filter(rhohat_long, set == 2) + ggtitle("Ignorable, A is NOT a Shadow Variable")
+g_rho3 <- g + filter(rhohat_long, set == 3) + ggtitle("Non-Ignorable, A is a Shadow Variable")
+g_rho4 <- g + filter(rhohat_long, set == 4) + ggtitle("Non-Ignorable, A is NOT a Shadow Variable")
+```
+
+Estimated from the scenarios with NP > P
+
+```{r}
+ggpubr::ggarrange(g_rho1, g_rho2, g_rho3, g_rho4, common.legend = TRUE)
+```
+
+
+```{r}
+# Bias plot
+g_bias <- sumstats %>%
+  ggplot(aes(y = fct_rev(covariates), x = mean_bias, color = factor(rho_ya.z), shape = factor(rho_ya.z))) + 
+  geom_point(size = 1, position = pd) + 
+  geom_errorbar(aes(xmin = lb_bias, xmax = ub_bias), position = pd, width = 0.3) + 
+  geom_vline(xintercept = 0, linetype = 2, color = "grey50") + 
+  labs(x = "Empirical Bias", y = " ", color = "Cor(Y,A|Z)", shape = "Cor(Y,A|Z)") + 
+  ggh4x::facet_nested(phi_value ~ or_y + or_a, 
+                      labeller = labeller(or_y = or_y.labs, or_a = or_a.labs),
+                      scales = "free", space = "free_y")  + 
+  theme(strip.background.y = element_blank(),
+        panel.spacing.y = unit(0,"cm")) +
+  theme(legend.position = "bottom")
+
+# ignorable
+g_bias1 <- g_bias + filter(sumstats, or_y == 1)
+# nonignorable w/shadow var
+g_bias2 <- g_bias + filter(sumstats, or_y > 1 & or_a == 1) + 
+  ggh4x::facet_nested(phi_value ~ or_a + or_y, 
+                      labeller = labeller(or_y = or_y.labs, or_a = or_a.labs),
+                      scales = "free", space = "free_y")
+# nonignorable no shadow var
+g_bias3 <- g_bias + filter(sumstats, or_y > 1 & or_a > 1)
+
+# Coverage plot
+g_cov <- sumstats %>%
+  # filter(!is.na(mean_cover)) %>%
+  ggplot(aes(y = fct_rev(covariates), x = mean_cover, color = factor(rho_ya.z), shape = factor(rho_ya.z))) + 
+  geom_point(size = 1, position = pd) + 
+  geom_errorbar(aes(xmin = lb_cover, xmax = ub_cover), position = pd, width = 0.2) + 
+  geom_vline(xintercept = 0.95, linetype = 2, color = "grey50") + 
+  labs(x = "Empirical Coverage of 95% Intervals", y = " ", color = "Cor(Y,A|Z)", shape = "Cor(Y,A|Z)") + 
+  theme(legend.position = "right") + 
+  ggh4x::facet_nested(phi_value ~ or_y + or_a, 
+                      labeller = labeller(or_y = or_y.labs, or_a = or_a.labs),
+                      scales = "free", space = "free_y") + 
+  theme(strip.background.y = element_blank(),
+        panel.spacing.y = unit(0,"cm")) +
+  coord_cartesian(xlim = c(0,1)) +
+  theme(legend.position = "bottom")
+g_cov1 <- g_cov + filter(sumstats, or_y == 1)
+g_cov2 <- g_cov + filter(sumstats, or_y > 1 & or_a == 1) + 
+  ggh4x::facet_nested(phi_value ~ or_a + or_y, 
+                      labeller = labeller(or_y = or_y.labs, or_a = or_a.labs),
+                      scales = "free", space = "free_y") +
+  theme(legend.position = "bottom")
+g_cov3 <- g_cov + filter(sumstats, or_y > 1 & or_a > 1)
+
+# CI Width plot
+g_wid <- sumstats %>%
+  ggplot(aes(y = fct_rev(covariates), x = median_width, color = factor(rho_ya.z), shape = factor(rho_ya.z))) + 
+  geom_point(size = 1, position = pd) + 
+  geom_errorbar(aes(xmin = 0, xmax = median_width), position = pd, width = 0, orientation = "y") + 
+  geom_vline(xintercept = 0, linetype = 1, color = "grey50") + 
+  labs(x = "Median CI Width", y = " ", color = "Cor(Y,A|Z)", shape = "Cor(Y,A|Z)") + 
+  theme(legend.position = "right") + 
+  ggh4x::facet_nested(phi_value ~ or_y + or_a, 
+                      labeller = labeller(or_y = or_y.labs, or_a = or_a.labs),
+                      scales = "free", space = "free_y") + 
+  theme(strip.background.y = element_blank(),
+        panel.spacing.y = unit(0,"cm")) +
+  theme(legend.position = "bottom")
+g_wid1 <- g_wid + filter(sumstats, or_y == 1)
+g_wid2 <- g_wid + filter(sumstats, or_y > 1 & or_a == 1) + 
+  ggh4x::facet_nested(phi_value ~ or_a + or_y, 
+                      labeller = labeller(or_y = or_y.labs, or_a = or_a.labs),
+                      scales = "free", space = "free_y")
+g_wid3 <- g_wid + filter(sumstats, or_y > 1 & or_a > 1)
+```
+
+### Ignorable {.tabset}
+
+OR(Y) = 1
+
+-   When OR(A) = 1:
+    -   Since A is not associated with selection (after conditioning on Z1 & Z2), leaving it out of the PPMM-Reg approach doesn't lead to bias
+    -   True $\phi$ = 0 for all three specifications of the model
+    -   Thus, all are unbiased for $\phi=0$
+-   When OR(A) > 1:
+    -   True $\phi$ = 0 when A is included in the model (either as the proxy or as a covariate)
+    -   Excluding A leads to bias b/c A is being ignored but it is associated with selection
+    -   Thus, only the models that include A will be unbiased (with $\phi=0$)
+
+#### Bias
+```{r, fig.asp=0.5}
+g_bias1
+```
+
+#### Coverage
+```{r, fig.asp=0.5}
+g_cov1
+```
+
+#### CI Width
+```{r, fig.asp=0.5}
+g_wid1
+```
+
+### Non-Ignorable, A is a Shadow Variable {.tabset}
+
+OR(Y) = {1.1, 2} and OR(A) = 1
+
+-   When A is used as the proxy the true $\phi$ = 1 (since selection depends on Y and not on the proxy)
+    -   Thus, the original approach is unbiased with $\phi$ = 1   
+
+-   When the role of A and Z2 are flipped, and Z2 is used to make the proxy, the true $\phi$ is somewhere between 0 and 1 since selection depends on both Y and the proxy
+    -   In this specific simulation design, when the OR(Y) and OR(Z2) are both 1.1, then the true $\phi$ will be close to 0.5 and thus $\phi$~Uniform will produce essentially unbiased results (since the point estimate will correspond to $\phi$ = 0.5 with the Uniform prior)
+    -   When OR(Y) = 2, $\phi$ is >0.5 (selection depends more strongly on Y than the proxy) so $\phi$~Uniform isn't close to unbiased
+
+-   When A is not used at all, PPMM-Reg can still perform well because A isn't associated with selection (so ignoring it is okay). The true $\phi$ is somewhere between 0 and 1, and in the case when OR(Y) = 1.1 we again have true $\phi$ close to 0.5, so $\phi$~Uniform will produce essentially unbiased results. When OR(Y) = 2, the true $\phi$ is again >0.5 so there is some bias with $\phi$~Uniform.
+
+#### Bias
+```{r, fig.asp=0.5}
+g_bias2
+```
+
+#### Coverage
+```{r, fig.asp=0.5}
+g_cov2
+```
+
+#### CI Width
+```{r, fig.asp=0.5}
+g_wid2
+```
+
+### Non-Ignorable, A is NOT a Shadow Variable {.tabset}
+
+OR(Y) = {1.1, 2} and OR(A) = {1.1, 2}
+
+-   Flipping A and Z2 will have similar performance as original when OR(A) = 1.1 b/c that is the same OR as for Z2
+-   It will have different performance when OR(A) = 2 b/c that is different (larger) than the OR for Z2
+-   PPMM-Reg ignoring A will be biased (regardless of $\phi$) since A is associated with selection
+
+#### Bias
+```{r, fig.asp=0.5}
+g_bias3
+```
+
+#### Coverage
+```{r, fig.asp=0.5}
+g_cov3
+```
+
+#### CI Width
+```{r, fig.asp=0.5}
+g_wid3
+```
